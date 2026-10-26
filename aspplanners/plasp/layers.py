@@ -92,19 +92,6 @@ class Layer:
     `kind_features` are the ``ProblemKind.has_*`` predicates that imply this
     layer. They are consulted defensively (a name absent from the installed
     unified-planning is skipped) so that a UP upgrade cannot break selection.
-
-    `strategy` marks a layer that changes how the horizon is read rather than
-    what the task can state -- the existstep layer, which lets a step carry a
-    set of actions. Such a layer owns no fact and no kind feature, so nothing
-    about the task ever implies it; it is loaded only by naming it in the spec
-    (``'seq+existstep'``), and naming it does not switch off the inference of
-    the feature layers the task needs (see :meth:`EncodingFamily.resolve`).
-
-    `excludes` are the layers this one cannot be loaded with. The sequential
-    reading is an assumption some feature layers make (temporal: one snap
-    action per happening) or one a layer has not been extended past (numeric),
-    and the program would be silently wrong rather than loud, so the pair is
-    refused at construction instead.
     """
     name: str
     filename: str
@@ -113,8 +100,6 @@ class Layer:
     requires: Tuple[str, ...] = ()
     kind_features: Tuple[str, ...] = ()
     summary: str = ''
-    strategy: bool = False
-    excludes: Tuple[str, ...] = ()
 
 
 # Facts whose presence pulls in a layer beyond the one that owns them. These are
@@ -208,18 +193,6 @@ SEQ_LAYERS: Tuple[Layer, ...] = (
             'has_real_type_durations',
         ),
     ),
-    Layer(
-        name='existstep',
-        filename='existstep.lp',
-        summary='exists-step parallel semantics: a step carries a set of actions '
-                'executable in the fixed term order (prototype, classical tasks)',
-        requires=('core',),
-        strategy=True,
-        # numeric: its effects and comparisons are not in the layer's
-        # read/write analysis yet, so two increments of one fluent could share
-        # a step. temporal: happenings are built on one snap action per step.
-        excludes=('numeric', 'temporal'),
-    ),
 )
 
 
@@ -230,11 +203,24 @@ class EncodingFamily:
     `layers` is in dependency order: a layer never precedes one it requires, and
     that order is also the load order, so ``core.lp`` -- which declares the
     program parts and the ``query(t)`` external -- is always first.
+
+    `parallel` says whether a horizon step may carry several actions. It
+    decides how the planner serialises a model: one action per step needs no
+    order within a step, a set of actions is serialised in the term order the
+    family's interference rules were stated for.
+
+    `unsupported` names the fact vocabulary this family has no layer for, by
+    the name of the feature it belongs to, with the reason. A task emitting one
+    of those facts is refused with that reason at construction -- the generic
+    coverage error would say the registry has drifted, when what is true is
+    that the family does not take the task.
     """
     name: str
     directory: str
     layers: Tuple[Layer, ...]
     base: str = 'core'
+    parallel: bool = False
+    unsupported: Tuple[Tuple[str, FrozenSet[str], str], ...] = ()
 
     @property
     def by_name(self) -> Dict[str, Layer]:
@@ -304,42 +290,6 @@ class EncodingFamily:
             needed |= self.layers_from_kind(kind)
         return self.close(needed)
 
-    def resolve(self, explicit: Optional[Sequence[str]], predicates: Set[str],
-                kind=None) -> Tuple[str, ...]:
-        """The layers for a task given an explicit spec, or None for "infer".
-
-        The spec's *feature* layers, when it names any, take over from the
-        inference (and are still closed and coverage-checked by the caller, so
-        naming too few is an error, not a program that ignores half the task).
-        Its *strategy* layers are added on top of whichever feature set results,
-        so ``'seq+existstep'`` on a task with disjunctive conditions still loads
-        the disjunctive layer -- a strategy says how to search, not what the
-        task is, and must not cost the task its own layers.
-        """
-        if explicit is None:
-            return self.select(predicates, kind)
-        known = self.by_name
-        unknown = [name for name in explicit if name not in known]
-        if unknown:
-            raise ValueError(
-                f"Unknown {self.name} encoding layer {unknown[0]!r}; available: "
-                f"{', '.join(self.layer_names)}")
-        strategies = [name for name in explicit if known[name].strategy]
-        features = [name for name in explicit if not known[name].strategy]
-        base = set(features) if features else set(self.select(predicates, kind))
-        return self.close(base | set(strategies))
-
-    def check_compatible(self, names: Sequence[str]) -> None:
-        """Raise when a selected layer excludes another selected one."""
-        selected = set(names)
-        for name in names:
-            clash = sorted(selected & set(self.by_name[name].excludes))
-            if clash:
-                raise ValueError(
-                    f"The {self.name} encoding layer {name!r} cannot be loaded with "
-                    f"{clash}: {self.by_name[name].summary}. The task needs {clash}, "
-                    f"so {name!r} does not apply to it.")
-
     # ------------------------------------------------------------------
     # Safety net
     # ------------------------------------------------------------------
@@ -366,6 +316,12 @@ class EncodingFamily:
 
     def check_coverage(self, predicates: Set[str], names: Sequence[str]) -> None:
         """Raise unless every emitted fact has a layer that reads it."""
+        for feature, vocabulary, reason in self.unsupported:
+            if predicates & vocabulary:
+                raise ValueError(
+                    f"The {self.name} encoding has no {feature} layer: {reason}. This task "
+                    f"emits {sorted(predicates & vocabulary)}, so it cannot be solved with "
+                    f"{self.name!r}; use the 'seq' encoding for it.")
         missing = self.unowned(predicates, names)
         if missing:
             culprits = sorted(
@@ -388,7 +344,50 @@ SEQ = EncodingFamily(
     layers=SEQ_LAYERS,
 )
 
-FAMILIES: Dict[str, EncodingFamily] = {SEQ.name: SEQ}
+_SEQ_BY_NAME = {layer.name: layer for layer in SEQ_LAYERS}
+
+# The exists-step family: the seq encoding with a set of actions per step
+# (prototype; see encodings/exist/core.lp). It keeps its own copies of the .lp
+# files rather than sharing seq's, so the directory is the whole encoding. Its
+# core and disjunctive layers own exactly what seq's do -- the task facts are
+# the same, only the step rules differ -- so the ownership sets are taken from
+# the seq registry rather than restated; the numeric and temporal vocabulary is
+# declared unsupported, with the reason, instead of being left for the generic
+# coverage error to call registry drift.
+EXIST_LAYERS: Tuple[Layer, ...] = (
+    Layer(
+        name='core',
+        filename='core.lp',
+        summary='multi-valued STRIPS, a set of actions per step executable in the '
+                'fixed term order (exists-step semantics)',
+        owns=_SEQ_BY_NAME['core'].owns,
+        describes_instance=_SEQ_BY_NAME['core'].describes_instance,
+    ),
+    Layer(
+        name='disjunctive',
+        filename='disjunctive.lp',
+        summary=_SEQ_BY_NAME['disjunctive'].summary,
+        requires=('core',),
+        owns=_SEQ_BY_NAME['disjunctive'].owns,
+        kind_features=_SEQ_BY_NAME['disjunctive'].kind_features,
+    ),
+)
+
+EXIST = EncodingFamily(
+    name='exist',
+    directory=os.path.join(ENCODINGS_DIR, 'exist'),
+    layers=EXIST_LAYERS,
+    parallel=True,
+    unsupported=(
+        ('numeric', _SEQ_BY_NAME['numeric'].owns | frozenset(PREDICATE_REQUIRES),
+         "its effects and comparisons are not in the exists-step read/write "
+         "analysis yet, so two actions updating one fluent could share a step"),
+        ('temporal', _SEQ_BY_NAME['temporal'].owns,
+         "happenings are built on one snap action per step"),
+    ),
+)
+
+FAMILIES: Dict[str, EncodingFamily] = {SEQ.name: SEQ, EXIST.name: EXIST}
 
 
 def parse_selection(spec: str) -> Tuple[str, Optional[Tuple[str, ...]]]:
@@ -396,6 +395,7 @@ def parse_selection(spec: str) -> Tuple[str, Optional[Tuple[str, ...]]]:
 
     ``'seq'``                   -> ``('seq', None)``  (layers chosen automatically)
     ``'seq+numeric+temporal'``  -> ``('seq', ('numeric', 'temporal'))``
+    ``'exist'``                 -> ``('exist', None)``
 
     ``None`` for the layers means "decide from the task"; an explicit list is
     still closed under `requires` and still coverage-checked, so forcing a set

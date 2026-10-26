@@ -1,11 +1,11 @@
-"""Tests for the existstep layer: exists-step parallel semantics on the horizon.
+"""Tests for the `exist` encoding family: exists-step parallel semantics.
 
-The layer lets a horizon step carry a set of actions that is executable in
-clingo's term order on the action terms. What is pinned here is (1) that it is
-a strategy -- named, never inferred, and additive to the feature layers the
-task needs; (2) the two interference rules, through tasks small enough that
-the horizon tells which steps the layer allowed; and (3) that the sequential
-reading is untouched by the switch core grew for it.
+The family is the seq encoding with a set of actions per horizon step, kept as
+its own directory of .lp files (encodings/exist/). What is pinned here is
+(1) the registry: its own files, the same fact ownership as seq, the numeric
+and temporal vocabulary refused with a reason; (2) the two interference rules,
+through tasks small enough that the horizon tells which steps were allowed;
+and (3) that the sequential family is untouched.
 """
 
 import os
@@ -19,7 +19,7 @@ from unified_planning.shortcuts import (
 from unified_planning.engines import PlanGenerationResultStatus
 
 import aspplanners  # noqa: F401  (registers the UP engines)
-from aspplanners.plasp.layers import SEQ, fact_predicates
+from aspplanners.plasp.layers import EXIST, SEQ, fact_predicates
 from aspplanners.plasp.planner import PLASPPlanner
 
 from test_planner import numeric_counter_problem, robot_line_problem
@@ -69,43 +69,56 @@ def two_actions(first, second, first_deletes_p=False, conflicting_writes=False):
 
 
 # ---------------------------------------------------------------------------
-# A strategy layer: named, never inferred, additive
+# The family's registry
 # ---------------------------------------------------------------------------
 
-def test_existstep_is_a_strategy_layer_that_owns_no_fact():
-    layer = SEQ.by_name["existstep"]
-    assert layer.strategy
-    assert layer.owns == frozenset() and layer.kind_features == ()
-    assert set(layer.excludes) == {"numeric", "temporal"}
+def test_the_exist_family_has_its_own_files():
+    assert EXIST.directory != SEQ.directory
+    for name in EXIST.layer_names:
+        assert os.path.isfile(EXIST.path(name)), name
+    assert EXIST.layer_names == ("core", "disjunctive")
+    assert EXIST.parallel and not SEQ.parallel
 
 
-def test_existstep_is_never_inferred_from_a_task():
-    planner = PLASPPlanner(pddl("gripper"), "seq")
-    assert "existstep" not in planner.layers
-    predicates = fact_predicates(planner.compiled_task.fact_lines)
-    assert "existstep" not in SEQ.select(predicates, planner.task.kind)
+def test_the_exist_layers_own_what_their_seq_counterparts_own():
+    """Same encoder, same facts: only the step rules differ, so the fact
+    vocabulary each layer consumes must be seq's -- or selection would drift."""
+    for layer in EXIST.layers:
+        assert layer.owns == SEQ.by_name[layer.name].owns, layer.name
 
 
-def test_naming_existstep_keeps_the_feature_layers_the_task_needs():
-    """A strategy says how to search, not what the task is: lift's disjunctive
-    conditions still load their layer when the spec names only existstep."""
-    planner = PLASPPlanner(pddl("lift"), "seq+existstep")
-    assert planner.layers == ("core", "disjunctive", "existstep")
-    assert planner.parallel_steps
+def test_the_exist_core_reads_every_fact_it_owns():
+    """Same drift guard test_layers applies to seq: a claimed fact has to be
+    read by a rule of the file that claims it."""
+    from test_layers import _rule_predicates  # noqa: F401  (same logic, other family)
+    import re
+    from aspplanners.lp_io import parse_lp_file, ASPDirective
+    for layer in EXIST.layers:
+        names = set()
+        for statement in parse_lp_file(EXIST.path(layer.name)):
+            if not isinstance(statement, ASPDirective):
+                names.update(re.findall(r"([a-z_][A-Za-z0-9_]*)\s*\(", str(statement)))
+        assert sorted((layer.owns - layer.describes_instance) - names) == [], layer.name
 
 
-def test_naming_existstep_with_feature_layers_takes_those_as_the_feature_set():
-    planner = PLASPPlanner(pddl("gripper"), "seq+disjunctive+existstep")
-    assert planner.layers == ("core", "disjunctive", "existstep")
+def test_exist_selects_the_feature_layers_the_task_needs():
+    assert PLASPPlanner(pddl("gripper"), "exist").layers == ("core",)
+    assert PLASPPlanner(pddl("lift"), "exist").layers == ("core", "disjunctive")
+    assert PLASPPlanner(pddl("gripper"), "exist+disjunctive").layers == ("core", "disjunctive")
 
 
-@pytest.mark.parametrize("make_problem", [
-    numeric_counter_problem,
-    lambda: pddl("matchcellar"),
+def test_exist_never_loads_a_seq_file():
+    planner = PLASPPlanner(pddl("lift"), "exist")
+    assert all(os.sep + "exist" + os.sep in path for path in planner.encoding_paths)
+
+
+@pytest.mark.parametrize("make_problem, feature", [
+    (numeric_counter_problem, "numeric"),
+    (lambda: pddl("matchcellar"), "temporal"),
 ])
-def test_existstep_refuses_the_layers_it_excludes(make_problem):
-    with pytest.raises(ValueError, match="cannot be loaded with"):
-        PLASPPlanner(make_problem(), "seq+existstep")
+def test_exist_refuses_numeric_and_temporal_tasks_with_a_reason(make_problem, feature):
+    with pytest.raises(ValueError, match=f"has no {feature} layer"):
+        PLASPPlanner(make_problem(), "exist")
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +129,7 @@ def test_independent_actions_share_a_step():
     """Gripper: pick with both grippers, move, drop both -- three steps for a
     five-action plan, and the serialised plan still validates."""
     sequential, _ = solve(pddl("gripper"), "seq")
-    parallel, plan = solve(pddl("gripper"), "seq+existstep")
+    parallel, plan = solve(pddl("gripper"), "exist")
     assert sequential.solved_horizon == 5
     assert parallel.solved_horizon == 3
     assert len(plan.actions) == 5
@@ -125,7 +138,7 @@ def test_independent_actions_share_a_step():
 def test_a_disabling_action_may_not_precede_what_it_disables():
     """`a_del` clears p, which `b_keep` needs. The fixed order runs `a_del`
     first, so the pair cannot share a step: two steps, `b_keep` before `a_del`."""
-    planner, plan = solve(two_actions("a_del", "b_keep", first_deletes_p=True), "seq+existstep")
+    planner, plan = solve(two_actions("a_del", "b_keep", first_deletes_p=True), "exist")
     assert planner.solved_horizon == 2
     assert [a.action.name for a in plan.actions] == ["b_keep", "a_del"]
 
@@ -133,13 +146,13 @@ def test_a_disabling_action_may_not_precede_what_it_disables():
 def test_a_disabling_action_may_follow_what_it_disables_in_the_same_step():
     """Same pair, renamed so the fixed order runs the reader first: one step,
     serialised reader-then-deleter -- the order the step is legal under."""
-    planner, plan = solve(two_actions("z_del", "b_keep", first_deletes_p=True), "seq+existstep")
+    planner, plan = solve(two_actions("z_del", "b_keep", first_deletes_p=True), "exist")
     assert planner.solved_horizon == 1
     assert [a.action.name for a in plan.actions] == ["b_keep", "z_del"]
 
 
 def test_two_actions_writing_one_variable_to_different_values_do_not_share_a_step():
-    planner, _ = solve(two_actions("a", "b", conflicting_writes=True), "seq+existstep")
+    planner, _ = solve(two_actions("a", "b", conflicting_writes=True), "exist")
     assert planner.solved_horizon == 2
 
 
@@ -147,7 +160,7 @@ def test_two_actions_writing_one_variable_to_the_same_value_do_share_a_step():
     problem = two_actions("a", "b")
     for action in problem.actions:
         action.add_effect(problem.fluent("v")(), True)
-    planner, _ = solve(problem, "seq+existstep")
+    planner, _ = solve(problem, "exist")
     assert planner.solved_horizon == 1
 
 
@@ -156,22 +169,22 @@ def test_one_action_may_still_set_and_clear_a_fluent_through_conditional_effects
     fluent; core's add-wins rule settles that, and the layer's conflicting-writes
     rule must not mistake it for two actions in conflict (it did, once)."""
     sequential, _ = solve(pddl("lift"), "seq")
-    parallel, _ = solve(pddl("lift"), "seq+existstep")
+    parallel, _ = solve(pddl("lift"), "exist")
     assert parallel.solved_horizon <= sequential.solved_horizon
 
 
 @pytest.mark.parametrize("domain", ["alarm", "blocksworld", "gripper", "lift", "transport"])
-def test_every_classical_bundled_domain_solves_under_existstep(domain):
+def test_every_classical_bundled_domain_solves_under_exist(domain):
     problems = sorted(f for f in os.listdir(os.path.join(PDDL_DIR, domain)) if f.startswith("problem"))
     for problem in problems:
         sequential, _ = solve(pddl(domain, problem), "seq")
-        parallel, _ = solve(pddl(domain, problem), "seq+existstep")
+        parallel, _ = solve(pddl(domain, problem), "exist")
         # Never longer: every sequential plan is an exists-step plan.
         assert parallel.solved_horizon <= sequential.solved_horizon, (domain, problem)
 
 
 def test_through_the_up_engine():
-    with OneshotPlanner(name="PLASPPlanner", params={"encoding": "seq+existstep"}) as planner:
+    with OneshotPlanner(name="PLASPPlanner", params={"encoding": "exist"}) as planner:
         result = planner.solve(pddl("gripper"))
     assert result.status == PlanGenerationResultStatus.SOLVED_SATISFICING
     assert len(result.plan.actions) == 5
@@ -185,5 +198,5 @@ def test_through_the_up_engine():
     robot_line_problem, lambda: pddl("gripper"), lambda: pddl("lift")])
 def test_the_sequential_reading_still_puts_one_action_per_step(make_problem):
     planner, plan = solve(make_problem(), "seq")
-    assert not planner.parallel_steps
+    assert not planner.family.parallel
     assert planner.solved_horizon == len(plan.actions)

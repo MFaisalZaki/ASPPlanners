@@ -16,9 +16,11 @@ from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
 # encoding family -> the encoder that produces its facts. Which *layers* of the
-# family get loaded is decided per task; see aspplanners.plasp.layers.
+# family get loaded is decided per task; see aspplanners.plasp.layers. The
+# exists-step family reads the same facts as seq, so it shares the encoder.
 ENCODERS = {
     'seq': PLASPEncoder,
+    'exist': PLASPEncoder,
 }
 
 
@@ -30,8 +32,10 @@ class PLASPPlanner:
 
     `encoder_type` names the encoding family and, optionally, its layers:
     ``'seq'`` picks the layers from the task itself, ``'seq+numeric+temporal'``
-    names them. Either way the resolved layers are in `self.layers` and the files
-    they load from in `self.encoding_paths`; see `aspplanners.plasp.layers`.
+    names them. ``'exist'`` is the exists-step family (a set of actions per
+    horizon step; classical tasks only, see ``encodings/exist/core.lp``). Either
+    way the resolved layers are in `self.layers` and the files they load from
+    in `self.encoding_paths`; see `aspplanners.plasp.layers`.
 
     The solve status of the last `plan()` call is kept in `self.status`
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
@@ -67,8 +71,8 @@ class PLASPPlanner:
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
         # The horizon the last plan() call found its plan at: the plan's length
-        # under the sequential reading, its number of parallel steps under
-        # existstep. None until a plan is found.
+        # under `seq`, its number of parallel steps under `exist`. None until a
+        # plan is found.
         self.solved_horizon: Optional[int] = None
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
@@ -78,21 +82,14 @@ class PLASPPlanner:
         is not taken at face value: it is closed under each layer's requirements
         and then coverage-checked like an inferred set, so naming too few layers
         is an error rather than a program that quietly ignores half the task.
-        A strategy layer in the spec (``'seq+existstep'``) is added on top of the
-        inferred feature layers rather than replacing them, and is checked
-        against the layers it excludes.
         """
         predicates = fact_predicates(self.compiled_task.fact_lines)
-        layers = self.family.resolve(explicit_layers, predicates, kind=self.task.kind)
+        if explicit_layers is None:
+            layers = self.family.select(predicates, kind=self.task.kind)
+        else:
+            layers = self.family.close(explicit_layers)
         self.family.check_coverage(predicates, layers)
-        self.family.check_compatible(layers)
         return layers
-
-    @property
-    def parallel_steps(self) -> bool:
-        """Whether a horizon step may carry several actions (a strategy layer
-        such as ``existstep`` is loaded). Decides how a model is serialised."""
-        return any(self.family.by_name[name].strategy for name in self.layers)
 
     def _check_compilationlist(self, problem, compilationlist: Optional[List[List[str]]]) -> List[List[str]]:
         """The UP compilers to run before encoding: by default, none."""
@@ -316,12 +313,11 @@ class PLASPPlanner:
         `SequentialPlan`.
 
         The actions of one step are serialised in clingo's order on their
-        terms. Under the sequential reading a step has one action and the key
-        is moot; under existstep that order is the one the layer's
-        interference constraints were stated for (its `A < B` is this same
-        order -- `clingo.Symbol` compares as gringo's terms do), so it is the
-        execution order the step is legal under, and the one the validator
-        then checks.
+        terms. Under `seq` a step has one action and the key is moot; under
+        a parallel family (`exist`) that order is the one its interference
+        rules were stated for (their `A < B` is this same order --
+        `clingo.Symbol` compares as gringo's terms do), so it is the execution
+        order the step is legal under, and the one the validator then checks.
         """
         if self.compiled_task.is_temporal:
             return self._extract_time_triggered_plan(symbols)

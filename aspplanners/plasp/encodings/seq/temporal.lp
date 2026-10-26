@@ -39,10 +39,9 @@
 %                       happening, and required to be exactly 0 at the end snap
 %                       (H9--H10).
 %
-% Unlike SMTPlan a happening carries exactly one snap action (core's one-action
-% step cap, which this layer relies on -- it excludes existstep), which makes
-% SMTPlan's mutex constraints between snap actions at the same happening
-% vacuous, so they are not encoded. The price is that snap
+% Unlike SMTPlan a happening carries exactly one snap action (core's 1{occurs}1
+% choice), which makes SMTPlan's mutex constraints between snap actions at the
+% same happening vacuous, so they are not encoded. The price is that snap
 % actions that must be *simultaneous* cannot be expressed -- they have to be
 % sequentialised epsilon apart. Continuous change (PDDL+ processes and events)
 % is out of scope: this is the PDDL 2.1 durative-action fragment of SMTPlan.

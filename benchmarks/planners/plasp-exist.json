@@ -1,9 +1,9 @@
 {
-    "planner-tag": "PLASPPlanner-existstep",
+    "planner-tag": "PLASPPlanner-exist",
     "up-planner-name": "PLASPPlanner",
     "up-planner-module": "aspplanners",
     "planner-params": {
-        "encoding": "seq+existstep",
+        "encoding": "exist",
         "max_horizon": 1000,
         "time_scale": 10
     },
