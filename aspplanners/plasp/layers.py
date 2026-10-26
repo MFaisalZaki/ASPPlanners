@@ -92,6 +92,19 @@ class Layer:
     `kind_features` are the ``ProblemKind.has_*`` predicates that imply this
     layer. They are consulted defensively (a name absent from the installed
     unified-planning is skipped) so that a UP upgrade cannot break selection.
+
+    `strategy` marks a layer that changes how the horizon is read rather than
+    what the task can state -- the existstep layer, which lets a step carry a
+    set of actions. Such a layer owns no fact and no kind feature, so nothing
+    about the task ever implies it; it is loaded only by naming it in the spec
+    (``'seq+existstep'``), and naming it does not switch off the inference of
+    the feature layers the task needs (see :meth:`EncodingFamily.resolve`).
+
+    `excludes` are the layers this one cannot be loaded with. The sequential
+    reading is an assumption some feature layers make (temporal: one snap
+    action per happening) or one a layer has not been extended past (numeric),
+    and the program would be silently wrong rather than loud, so the pair is
+    refused at construction instead.
     """
     name: str
     filename: str
@@ -100,6 +113,8 @@ class Layer:
     requires: Tuple[str, ...] = ()
     kind_features: Tuple[str, ...] = ()
     summary: str = ''
+    strategy: bool = False
+    excludes: Tuple[str, ...] = ()
 
 
 # Facts whose presence pulls in a layer beyond the one that owns them. These are
@@ -193,6 +208,18 @@ SEQ_LAYERS: Tuple[Layer, ...] = (
             'has_real_type_durations',
         ),
     ),
+    Layer(
+        name='existstep',
+        filename='existstep.lp',
+        summary='exists-step parallel semantics: a step carries a set of actions '
+                'executable in the fixed term order (prototype, classical tasks)',
+        requires=('core',),
+        strategy=True,
+        # numeric: its effects and comparisons are not in the layer's
+        # read/write analysis yet, so two increments of one fluent could share
+        # a step. temporal: happenings are built on one snap action per step.
+        excludes=('numeric', 'temporal'),
+    ),
 )
 
 
@@ -276,6 +303,42 @@ class EncodingFamily:
         if kind is not None:
             needed |= self.layers_from_kind(kind)
         return self.close(needed)
+
+    def resolve(self, explicit: Optional[Sequence[str]], predicates: Set[str],
+                kind=None) -> Tuple[str, ...]:
+        """The layers for a task given an explicit spec, or None for "infer".
+
+        The spec's *feature* layers, when it names any, take over from the
+        inference (and are still closed and coverage-checked by the caller, so
+        naming too few is an error, not a program that ignores half the task).
+        Its *strategy* layers are added on top of whichever feature set results,
+        so ``'seq+existstep'`` on a task with disjunctive conditions still loads
+        the disjunctive layer -- a strategy says how to search, not what the
+        task is, and must not cost the task its own layers.
+        """
+        if explicit is None:
+            return self.select(predicates, kind)
+        known = self.by_name
+        unknown = [name for name in explicit if name not in known]
+        if unknown:
+            raise ValueError(
+                f"Unknown {self.name} encoding layer {unknown[0]!r}; available: "
+                f"{', '.join(self.layer_names)}")
+        strategies = [name for name in explicit if known[name].strategy]
+        features = [name for name in explicit if not known[name].strategy]
+        base = set(features) if features else set(self.select(predicates, kind))
+        return self.close(base | set(strategies))
+
+    def check_compatible(self, names: Sequence[str]) -> None:
+        """Raise when a selected layer excludes another selected one."""
+        selected = set(names)
+        for name in names:
+            clash = sorted(selected & set(self.by_name[name].excludes))
+            if clash:
+                raise ValueError(
+                    f"The {self.name} encoding layer {name!r} cannot be loaded with "
+                    f"{clash}: {self.by_name[name].summary}. The task needs {clash}, "
+                    f"so {name!r} does not apply to it.")
 
     # ------------------------------------------------------------------
     # Safety net

@@ -218,6 +218,7 @@ The encoding is one `.lp` file per feature, under [aspplanners/plasp/encodings/s
 | `numeric` | [numeric.lp](aspplanners/plasp/encodings/seq/numeric.lp) | linear numeric fluents, comparisons, effects (conditional ones included) and goals |
 | `disjunctive` | [disjunctive.lp](aspplanners/plasp/encodings/seq/disjunctive.lp) | disjunctive, existential and nested conditions and goals |
 | `temporal` | [temporal.lp](aspplanners/plasp/encodings/seq/temporal.lp) | PDDL 2.1 durative actions as SMTPlan-style happenings, annotated with the SMTPlan constraint each rule mirrors |
+| `existstep` | [existstep.lp](aspplanners/plasp/encodings/seq/existstep.lp) | *strategy layer, prototype*: ∃-step parallel semantics — a step carries a set of actions, see [Parallel steps](#parallel-steps-existstep) |
 
 clingo merges `#program` parts of the same name across the files it is given, so the program for a task is the concatenation of the layers it needs, loaded in dependency order (`core` first — it declares the program parts and the `query(t)` external). Layers reference each other's predicates only through `#defined`, which is what lets one be left out without breaking the rest.
 
@@ -230,3 +231,18 @@ planner.encoding_paths  # the .lp files that will be loaded, in load order
 ```
 
 The emitted facts are the authority — they describe the task *as encoded*, after the compilation pipeline, TIM inference, numeric rescaling and the durative split. `ProblemKind` is a second opinion only: it reports declared features rather than the vocabulary the encoding consumes, and the two need not agree (a durative action whose duration reads a fluent produces numeric facts on a problem whose kind has no numeric feature at all). Where they differ, the union wins — an unneeded layer grounds to nothing, while a missing one would be silently ignored.
+
+### Parallel steps (`existstep`)
+
+Under the default reading a horizon step holds **one** action, so the horizon the deepening search has to reach is the plan's length, and every unsatisfiable horizon on the way is paid for in full. The `existstep` layer switches the horizon to **∃-step parallel semantics** (Rintanen, Heljanko & Niemelä, AIJ 2006): a step holds a *set* of actions, legal when there is an order in which they can be executed one after the other from the state before the step and that execution ends in the state core already computes by applying all their effects at once. Every sequential plan is still a plan, so nothing is lost; independent actions stop costing a horizon step each.
+
+```python
+planner = PLASPPlanner(problem, "seq+existstep")   # or params={"encoding": "seq+existstep"} through UP
+plan = planner.plan()
+planner.layers            # ('core', 'existstep') -- plus whatever feature layers the task needs
+planner.solved_horizon    # the number of parallel steps; len(plan.actions) is still the plan length
+```
+
+The order is fixed up front rather than searched for: clingo's own order on the ground action terms. For a fixed order a set is legal iff no action *disables* a later one (writes a variable the later one reads, to another value than it reads) and no two actions write one variable to different values — the layer states the first as a chain per read (variable, value) and the second as a count of writers per variable, so both are linear in the step. "Reads" covers preconditions, the conditions of conditional effects and every literal of a disjunctive condition; "writes" covers every effect, conditional or not — both over-approximate, which only ever forbids a step that would have been fine. The planner serialises each step in that same order, so the sequential plan it validates and returns is the order the step was legal under.
+
+`existstep` is a *strategy* layer: it owns no fact and no `ProblemKind` feature, so it is never inferred — you name it — and naming it adds it on top of the feature layers the task needs rather than replacing them (`seq+existstep` on a task with disjunctive conditions loads `core`, `disjunctive`, `existstep`). It is a prototype scoped to classical tasks: it **excludes `numeric`** (the numeric layer's effects and comparisons are not in its read/write analysis yet, so two increments of one fluent could share a step) and **`temporal`** (happenings are built on one snap action per step), and constructing a planner that would need either raises rather than searching with a program that is silently wrong. The benchmark configuration carries it as [plasp-existstep.json](benchmarks/planners/plasp-existstep.json) on the classical track.

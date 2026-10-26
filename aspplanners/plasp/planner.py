@@ -66,6 +66,10 @@ class PLASPPlanner:
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
+        # The horizon the last plan() call found its plan at: the plan's length
+        # under the sequential reading, its number of parallel steps under
+        # existstep. None until a plan is found.
+        self.solved_horizon: Optional[int] = None
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
         """Resolve the encoding layers for this task, explicit or inferred.
@@ -74,14 +78,21 @@ class PLASPPlanner:
         is not taken at face value: it is closed under each layer's requirements
         and then coverage-checked like an inferred set, so naming too few layers
         is an error rather than a program that quietly ignores half the task.
+        A strategy layer in the spec (``'seq+existstep'``) is added on top of the
+        inferred feature layers rather than replacing them, and is checked
+        against the layers it excludes.
         """
         predicates = fact_predicates(self.compiled_task.fact_lines)
-        if explicit_layers is None:
-            layers = self.family.select(predicates, kind=self.task.kind)
-        else:
-            layers = self.family.close(explicit_layers)
+        layers = self.family.resolve(explicit_layers, predicates, kind=self.task.kind)
         self.family.check_coverage(predicates, layers)
+        self.family.check_compatible(layers)
         return layers
+
+    @property
+    def parallel_steps(self) -> bool:
+        """Whether a horizon step may carry several actions (a strategy layer
+        such as ``existstep`` is loaded). Decides how a model is serialised."""
+        return any(self.family.by_name[name].strategy for name in self.layers)
 
     def _check_compilationlist(self, problem, compilationlist: Optional[List[List[str]]]) -> List[List[str]]:
         """The UP compilers to run before encoding: by default, none."""
@@ -290,6 +301,7 @@ class PLASPPlanner:
             self.logs.append(f'Plan validation failed: {reason}')
             return self._empty_plan()
         self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
+        self.solved_horizon = horizon
         return _plan
 
     # ------------------------------------------------------------------
@@ -302,11 +314,19 @@ class PLASPPlanner:
 
         A temporal task yields a `TimeTriggeredPlan`, everything else a
         `SequentialPlan`.
+
+        The actions of one step are serialised in clingo's order on their
+        terms. Under the sequential reading a step has one action and the key
+        is moot; under existstep that order is the one the layer's
+        interference constraints were stated for (its `A < B` is this same
+        order -- `clingo.Symbol` compares as gringo's terms do), so it is the
+        execution order the step is legal under, and the one the validator
+        then checks.
         """
         if self.compiled_task.is_temporal:
             return self._extract_time_triggered_plan(symbols)
         occurs = sorted((s for s in symbols if s.match('occurs', 2)),
-                        key=lambda s: s.arguments[1].number)
+                        key=lambda s: (s.arguments[1].number, s.arguments[0]))
         steps = [self._construct_action(self._action_tuple(s)) for s in occurs]
         _plan = SequentialPlan(steps)
         return _plan.replace_action_instances(self.compiled_task.map_back_action_instance)
