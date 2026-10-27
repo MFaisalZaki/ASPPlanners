@@ -1,10 +1,9 @@
 {
-    "planner-tag": "PLASPPlanner-seq-forall",
+    "planner-tag": "PLASPPlanner-exists",
     "up-planner-name": "PLASPPlanner",
     "up-planner-module": "aspplanners",
     "planner-params": {
-        "encoding": "seq",
-        "parallel": "forall",
+        "encoding": "exists",
         "interference": "lazy",
         "max_horizon": 1000,
         "time_scale": 10

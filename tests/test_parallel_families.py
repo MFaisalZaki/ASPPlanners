@@ -1,12 +1,14 @@
-"""Tests for the parallel-step propagators (aspplanners.plasp.propagators).
+"""Tests for the `forall` and `exists` encoding families and their propagators.
 
-Under `parallel='exists'` / `'forall'` a horizon step holds a set of actions and
-a propagator generates the mutexes on demand during search, after Abdelwahed,
-Bofill, Espasa & Villaret (ICAPS 2026). Pinned here: (1) the semantics, through
-tasks small enough that the horizon says which steps were allowed, and through
-every bundled classical and numeric domain, whose plans the UP validator
-checks; (2) the read/write analysis the propagator builds from the facts;
-(3) that the sequential reading is unchanged and temporal tasks are refused.
+Each is the seq encoding, in its own directory of .lp files, with a horizon
+step read as a set of actions and the mutexes generated on demand during
+search by a propagator (aspplanners.plasp.propagators), after Abdelwahed,
+Bofill, Espasa & Villaret (ICAPS 2026). Pinned here: (1) the registry: own
+files, the same fact ownership as seq, temporal refused with a reason; (2) the
+semantics, through tasks small enough that the horizon says which steps were
+allowed, and through every bundled classical and numeric domain, whose plans
+the UP validator checks; (3) the read/write analysis the propagator builds from
+the facts; (4) that the seq family is unchanged.
 """
 
 import os
@@ -21,6 +23,7 @@ from unified_planning.shortcuts import (
 from unified_planning.engines import PlanGenerationResultStatus
 
 import aspplanners  # noqa: F401  (registers the UP engines)
+from aspplanners.plasp.layers import EXISTS, FORALL, SEQ
 from aspplanners.plasp.planner import PLASPPlanner
 from aspplanners.plasp.propagators import ANY, InterferenceGraph, ParallelStepPropagator
 
@@ -34,8 +37,8 @@ def pddl(domain, problem="problem.pddl"):
                                       os.path.join(PDDL_DIR, domain, problem))
 
 
-def solve(problem, **options):
-    planner = PLASPPlanner(problem, **options)
+def solve(problem, encoding="seq", **options):
+    planner = PLASPPlanner(problem, encoding, **options)
     plan = planner.plan(timeout=120)
     assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING, planner.logs
     return planner, plan
@@ -68,6 +71,57 @@ def two_actions(first, second, first_deletes_p=False, conflicting_writes=False, 
 
 
 # ---------------------------------------------------------------------------
+# The families' registry
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("family", [FORALL, EXISTS], ids=lambda f: f.name)
+def test_a_parallel_family_has_its_own_files_and_seqs_ownership(family):
+    assert family.directory != SEQ.directory
+    assert family.layer_names == ("core", "numeric", "disjunctive")
+    for layer in family.layers:
+        assert os.path.isfile(family.path(layer.name)), layer.name
+        # Same encoder, same facts: only the step rules differ, so the fact
+        # vocabulary each layer consumes must be seq's or selection would drift.
+        assert layer.owns == SEQ.by_name[layer.name].owns, layer.name
+        assert layer.kind_features == SEQ.by_name[layer.name].kind_features, layer.name
+    assert family.propagator == family.name
+    assert SEQ.propagator is None
+
+
+@pytest.mark.parametrize("family", [FORALL, EXISTS], ids=lambda f: f.name)
+def test_the_numeric_and_disjunctive_copies_are_verbatim(family):
+    """Only the header differs: the rules are seq's, byte for byte."""
+    def rules(path):
+        text = open(path).read()
+        return text[text.index("#program base."):]
+    for name in ("numeric", "disjunctive"):
+        assert rules(family.path(name)) == rules(SEQ.path(name)), name
+
+
+@pytest.mark.parametrize("encoding", ["forall", "exists"])
+def test_a_parallel_family_selects_the_feature_layers_the_task_needs(encoding):
+    assert PLASPPlanner(pddl("gripper"), encoding).layers == ("core",)
+    assert PLASPPlanner(pddl("lift"), encoding).layers == ("core", "disjunctive")
+    assert PLASPPlanner(pddl("rover"), encoding).layers == ("core", "numeric")
+    planner = PLASPPlanner(pddl("lift"), encoding)
+    assert all(os.sep + encoding + os.sep in path for path in planner.encoding_paths)
+
+
+@pytest.mark.parametrize("encoding", ["forall", "exists"])
+def test_temporal_tasks_are_refused_with_a_reason(encoding):
+    with pytest.raises(ValueError, match="has no temporal layer"):
+        PLASPPlanner(pddl("matchcellar"), encoding)
+
+
+def test_the_parallel_cores_state_a_set_of_actions_and_seqs_core_one():
+    assert "1 {occurs(Action, t) : action(Action)} 1." in PLASPPlanner(pddl("gripper")).lp_program()
+    for encoding in ("forall", "exists"):
+        program = PLASPPlanner(pddl("gripper"), encoding).lp_program()
+        assert "1 {occurs(Action, t) : action(Action)}." in program
+        assert "} 1." not in program
+
+
+# ---------------------------------------------------------------------------
 # Semantics, on tasks whose horizon tells what was allowed to share a step
 # ---------------------------------------------------------------------------
 
@@ -75,8 +129,8 @@ def test_independent_actions_share_a_step():
     """Gripper: pick with both grippers and move in one exists-step (the move
     disables the picks, so it is serialised last); three steps under forall."""
     sequential, _ = solve(pddl("gripper"))
-    exists, plan = solve(pddl("gripper"), parallel="exists")
-    forall, _ = solve(pddl("gripper"), parallel="forall")
+    exists, plan = solve(pddl("gripper"), "exists")
+    forall, _ = solve(pddl("gripper"), "forall")
     assert (sequential.solved_horizon, exists.solved_horizon, forall.solved_horizon) == (5, 2, 3)
     assert len(plan.actions) == 5
 
@@ -87,10 +141,10 @@ def test_a_disabling_pair_shares_an_exists_step_in_the_right_order_whatever_the_
     order would be. Under forall-step they interfere and cannot share one."""
     for names in (("a_del", "b_keep"), ("z_del", "b_keep")):
         problem = two_actions(*names, first_deletes_p=True)
-        exists, plan = solve(problem, parallel="exists")
+        exists, plan = solve(problem, "exists")
         assert exists.solved_horizon == 1
         assert [a.action.name for a in plan.actions] == [names[1], names[0]]
-        forall, _ = solve(problem, parallel="forall")
+        forall, _ = solve(problem, "forall")
         assert forall.solved_horizon == 2
 
 
@@ -118,14 +172,14 @@ def two_cycle_problem():
 
 def test_a_two_cycle_cannot_share_a_step():
     sequential, _ = solve(two_cycle_problem())
-    exists, plan = solve(two_cycle_problem(), parallel="exists")
+    exists, plan = solve(two_cycle_problem(), "exists")
     assert sequential.solved_horizon == exists.solved_horizon == 3
     assert [x.action.name for x in plan.actions] in (["a", "restore", "b"], ["b", "restore", "a"])
 
 
 def test_writes_to_different_values_do_not_share_a_step_but_equal_writes_do():
-    clash, _ = solve(two_actions("a", "b", conflicting_writes=True), parallel="exists")
-    agree, _ = solve(two_actions("a", "b", same_writes=True), parallel="exists")
+    clash, _ = solve(two_actions("a", "b", conflicting_writes=True), "exists")
+    agree, _ = solve(two_actions("a", "b", same_writes=True), "exists")
     assert (clash.solved_horizon, agree.solved_horizon) == (2, 1)
 
 
@@ -134,7 +188,7 @@ def test_one_action_may_still_set_and_clear_a_fluent_through_conditional_effects
     fluent; core's add-wins rule settles that within one action, and the
     propagator only ever judges pairs of distinct actions."""
     sequential, _ = solve(pddl("lift"))
-    exists, _ = solve(pddl("lift"), parallel="exists")
+    exists, _ = solve(pddl("lift"), "exists")
     assert exists.solved_horizon == 4 < sequential.solved_horizon == 5
 
 
@@ -147,15 +201,15 @@ def test_every_bundled_classical_and_numeric_domain_solves_in_parallel(domain):
     problems = sorted(f for f in os.listdir(os.path.join(PDDL_DIR, domain)) if f.startswith("problem"))
     for problem in problems:
         sequential, _ = solve(pddl(domain, problem))
-        forall, _ = solve(pddl(domain, problem), parallel="forall")
-        exists, _ = solve(pddl(domain, problem), parallel="exists")
+        forall, _ = solve(pddl(domain, problem), "forall")
+        exists, _ = solve(pddl(domain, problem), "exists")
         assert exists.solved_horizon <= forall.solved_horizon <= sequential.solved_horizon, (domain, problem)
 
 
 def test_eager_and_lazy_interference_agree():
     for domain in ("gripper", "lift", "rover"):
-        lazy, _ = solve(pddl(domain), parallel="exists", interference="lazy")
-        eager, _ = solve(pddl(domain), parallel="exists", interference="eager")
+        lazy, _ = solve(pddl(domain), "exists", interference="lazy")
+        eager, _ = solve(pddl(domain), "exists", interference="eager")
         assert lazy.solved_horizon == eager.solved_horizon, domain
 
 
@@ -181,12 +235,12 @@ def two_ticks_problem():
 def test_numeric_writers_of_one_fluent_do_not_share_a_step():
     """Two `tick`s would each state counter+1 as the new value -- two values, not
     a sum -- so the propagator keeps numeric writers of one fluent apart."""
-    planner, plan = solve(two_ticks_problem(), parallel="exists")
+    planner, plan = solve(two_ticks_problem(), "exists")
     assert planner.solved_horizon == 3 and len(plan.actions) == 3
 
 
 def test_through_the_up_engine():
-    with OneshotPlanner(name="PLASPPlanner", params={"parallel": "exists"}) as planner:
+    with OneshotPlanner(name="PLASPPlanner", params={"encoding": "exists"}) as planner:
         result = planner.solve(pddl("gripper"))
     assert result.status == PlanGenerationResultStatus.SOLVED_SATISFICING
     assert len(result.plan.actions) == 5
@@ -248,26 +302,16 @@ def test_serialise_orders_a_step_topologically_and_rejects_a_cycle():
 
 
 # ---------------------------------------------------------------------------
-# Options, refusals, and the sequential reading
+# Options and the seq family
 # ---------------------------------------------------------------------------
 
 def test_bad_options_are_rejected():
-    with pytest.raises(ValueError, match="parallel must be"):
-        PLASPPlanner(robot_line_problem(), parallel="sometimes")
+    with pytest.raises(ValueError, match="Unsupported encoding family"):
+        PLASPPlanner(robot_line_problem(), "sometimes")
     with pytest.raises(ValueError, match="interference must be"):
-        PLASPPlanner(robot_line_problem(), parallel="exists", interference="psychic")
+        PLASPPlanner(robot_line_problem(), "exists", interference="psychic")
     with pytest.raises(ValueError, match="semantics must be"):
         ParallelStepPropagator("maybe")
-
-
-def test_temporal_tasks_are_refused():
-    with pytest.raises(ValueError, match="not available on a temporal task"):
-        PLASPPlanner(pddl("matchcellar"), parallel="exists")
-
-
-def test_the_dumped_program_states_the_parallel_switch():
-    assert "parallelSteps." in PLASPPlanner(pddl("gripper"), parallel="exists").lp_program()
-    assert "parallelSteps." not in PLASPPlanner(pddl("gripper")).lp_program()
 
 
 @pytest.mark.parametrize("make_problem", [
@@ -276,15 +320,3 @@ def test_the_sequential_reading_still_puts_one_action_per_step(make_problem):
     planner, plan = solve(make_problem())
     assert planner.parallel is None
     assert planner.solved_horizon == len(plan.actions)
-
-
-@pytest.mark.parametrize("domain", ["gripper", "lift", "blocksworld", "rover", "zenoflight"])
-def test_the_propagator_enforced_sequential_cap_admits_the_same_horizons(domain):
-    """`parallel='sequential'` drops core's cap and has the propagator reject any
-    two actions in one step: same semantics as the default, so the same
-    horizon, one action per step, and a validated plan."""
-    encoded, _ = solve(pddl(domain))
-    lazy, plan = solve(pddl(domain), parallel="sequential")
-    assert lazy.solved_horizon == encoded.solved_horizon == len(plan.actions)
-    assert "cap enforced by the propagator" in lazy.logs[-1]
-    assert lazy._propagator.graph is None   # no interference to judge

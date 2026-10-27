@@ -50,7 +50,11 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
     """UP engine adapter for the PLASP/clingo backend (engine name ``PLASPPlanner``).
 
     Recognised options:
-      - ``encoding``    (str, default ``"seq"``)
+      - ``encoding``    (str, default ``"seq"``: one action per horizon step;
+        ``"forall"`` / ``"exists"``: a set of actions per step under
+        forall-step / exists-step semantics, the interference constraints
+        generated on demand by a propagator, see
+        :mod:`aspplanners.plasp.propagators`; not for temporal tasks)
       - ``horizon``     (int, solve at one fixed horizon)
       - ``max_horizon`` (int, default 1000, bound for the deepening search)
       - ``time_scale``  (int, default 10, resolution of the temporal encoding's
@@ -58,13 +62,9 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
       - ``compilationlist`` (list of ``[engine_name, CompilationKind]`` pairs;
         takes over the automatic selection, see
         :meth:`PLASPPlanner._check_compilationlist`)
-      - ``parallel`` (``"exists"`` or ``"forall"``; default off) -- a set of
-        actions per horizon step, with the interference constraints generated
-        on demand by a propagator (see :mod:`aspplanners.plasp.propagators`);
-        ``"sequential"`` keeps one action per step with the cap enforced by
-        the propagator instead of the encoding; not available on temporal tasks
-      - ``interference`` (``"lazy"`` default, or ``"eager"``) -- when the
-        propagator judges whether two actions interfere
+      - ``interference`` (``"lazy"`` default, or ``"eager"``) -- under the
+        parallel encodings, when the propagator judges whether two actions
+        interfere
     """
 
     def __init__(self, **options):
@@ -176,13 +176,11 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         max_horizon = self.conf.get('max_horizon', 1000)
         time_scale = int(self.conf.get('time_scale', DEFAULT_TIME_SCALE))
         compilationlist = self.conf.get('compilationlist')
-        parallel = self.conf.get('parallel')
         interference = self.conf.get('interference', 'lazy')
 
         try:
             planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
-                                   time_scale=time_scale, parallel=parallel,
-                                   interference=interference)
+                                   time_scale=time_scale, interference=interference)
             plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout)
         except NotImplementedError as refusal:
             return _unsupported_result(self.name, refusal)

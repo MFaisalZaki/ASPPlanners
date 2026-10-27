@@ -87,9 +87,8 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `max_horizon` | both | 1000 | upper bound on the iterative-deepening search |
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
-| `encoding` | PLASP | `"seq"` | encoding family |
-| `parallel` | PLASP | off | `"exists"` or `"forall"`: a set of actions per horizon step, mutexes generated on demand, see [Parallel steps](#parallel-steps-on-demand-mutexes); `"sequential"`: one action per step with the cap enforced by the propagator instead of the encoding; not for temporal tasks |
-| `interference` | PLASP | `"lazy"` | `"lazy"` judges whether two actions interfere the first time the solver puts them together, `"eager"` judges every pair up front |
+| `encoding` | PLASP | `"seq"` | encoding family: `"seq"` (one action per horizon step), `"forall"` or `"exists"` (a set of actions per step, mutexes generated on demand; not for temporal tasks), see [Encoding families](#encoding-families) |
+| `interference` | PLASP | `"lazy"` | under `forall`/`exists`: `"lazy"` judges whether two actions interfere the first time the solver puts them together, `"eager"` judges every pair up front |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
 | `timeout` | PLASP only | — | honored by `PLASPPlanner`; **`ABAPlanner` ignores it**, so bound its search with `max_horizon` |
 
@@ -210,9 +209,21 @@ planner = PLASPPlanner(problem, encoder_type="seq", compilationlist=pipeline)
 plan = planner.plan()
 ```
 
+## Encoding families
+
+There are three encoding families, one directory each under [aspplanners/plasp/encodings/](aspplanners/plasp/encodings/). They share the task facts, the multi-shot structure and the feature layers, and differ in how a horizon step is read:
+
+| Family | Directory | A horizon step holds | Layers |
+|---|---|---|---|
+| `seq` | [seq/](aspplanners/plasp/encodings/seq/) | one action | core, numeric, disjunctive, temporal |
+| `forall` | [forall/](aspplanners/plasp/encodings/forall/) | a set of actions no two of which interfere (any order works) | core, numeric, disjunctive |
+| `exists` | [exists/](aspplanners/plasp/encodings/exists/) | a set of actions that can be executed in some order | core, numeric, disjunctive |
+
+Each directory is the whole encoding: the parallel families keep their own copies of `numeric.lp` and `disjunctive.lp` (verbatim) rather than sharing seq's, so a change to one family cannot silently change another. Their `core.lp` differs from seq's in one rule — the step choice is `1 {occurs(A, t)}` instead of `1 {occurs(A, t)} 1` — and in what is *not* there: the interference constraints that make a set of actions legal, which are generated on demand by a propagator (see [Parallel steps](#parallel-steps-on-demand-mutexes)). They have no temporal layer, because the temporal encoding's happenings are built on one snap action per step; a temporal task is refused at construction with that reason.
+
 ## Encoding layers
 
-The encoding is one `.lp` file per feature, under [aspplanners/plasp/encodings/seq/](aspplanners/plasp/encodings/seq/):
+Within a family the encoding is one `.lp` file per feature; for `seq`, under [aspplanners/plasp/encodings/seq/](aspplanners/plasp/encodings/seq/):
 
 | Layer | File | Covers |
 |---|---|---|
@@ -235,22 +246,20 @@ The emitted facts are the authority — they describe the task *as encoded*, aft
 
 ## Parallel steps: on-demand mutexes
 
-Under the default reading a horizon step holds **one** action, so the horizon the deepening search has to reach is the plan's length, and the unsatisfiable horizons on the way are paid for in full. `parallel="exists"` or `"forall"` lets a step hold a *set* of actions:
+Under `seq` a horizon step holds **one** action, so the horizon the deepening search has to reach is the plan's length, and the unsatisfiable horizons on the way are paid for in full. The `forall` and `exists` families let a step hold a *set* of actions:
 
 * **forall-step** (Kautz & Selman 1996): no two actions of a step interfere, so the step can be executed in any order;
 * **exists-step** (Dimopoulos, Nebel & Koehler 1997; Rintanen, Heljanko & Niemelä 2006): the step can be executed in *some* order — the disabling graph induced by its actions is acyclic.
 
-Either needs interference constraints between actions, and encoding them up front is quadratic in the actions per step. Instead, following Abdelwahed, Bofill, Espasa & Villaret, *On-Demand Mutex Constraints for Numeric Planning as SMT* (ICAPS 2026), the encoding states no interference at all — `core.lp`'s step choice drops to `1 {occurs(A, t)}` — and a clingo **propagator** ([aspplanners/plasp/propagators.py](aspplanners/plasp/propagators.py)) watches the action atoms during search: when the solver makes an action true, the forall propagator raises a conflict against any active action of the same step it interferes with, and the exists propagator raises one when the new action closes a cycle in the step's disabling graph, the cycle being the conflict. Conflicts are handed to clingo as nogoods, so a mutex is paid for only once it has been hit and is forgotten once it stops being useful. Interference is computed on first contact and memoised (`interference="lazy"`); `"eager"` precomputes the whole graph for comparison.
+Either needs interference constraints between actions, and encoding them up front is quadratic in the actions per step. Instead, following Abdelwahed, Bofill, Espasa & Villaret, *On-Demand Mutex Constraints for Numeric Planning as SMT* (ICAPS 2026), the encodings state no interference at all and a clingo **propagator** ([aspplanners/plasp/propagators.py](aspplanners/plasp/propagators.py)) watches the action atoms during search: when the solver makes an action true, the forall propagator raises a conflict against any active action of the same step it interferes with, and the exists propagator raises one when the new action closes a cycle in the step's disabling graph, the cycle being the conflict. Conflicts are handed to clingo as nogoods, so a mutex is paid for only once it has been hit and is forgotten once it stops being useful. Interference is computed on first contact and memoised (`interference="lazy"`); `"eager"` precomputes the whole graph for comparison.
 
 ```python
-planner = PLASPPlanner(problem, parallel="exists")   # or params={"parallel": "exists"} through UP
+planner = PLASPPlanner(problem, "exists")   # or params={"encoding": "exists"} through UP
 plan = planner.plan()
 planner.solved_horizon   # the number of parallel steps; len(plan.actions) is still the plan length
 planner.logs[-1]         # '... (exists-step, lazy interference: 379 mutex conflicts raised, 228 disabling edges among 1042 action pairs judged)'
 ```
 
-What the propagator knows about an action is read off the ground facts in the solver — `precondition`, `postcondition`, the disjunctive layer's `orDisjunct`, the numeric layer's effects and comparisons — so no encoding layer changes. An action *reads* the variables of its preconditions, of its conditional effects' conditions and of every literal of its disjunctive conditions, and *writes* every effect, conditional or not; `a` disables `b` when it writes a variable `b` reads to another value than `b` reads, or when both write one variable to different values. Numeric fluents are value-less: a numeric write disables every reader and conflicts with every other writer (the numeric layer's unconditional effects do not sum). All of this is syntactic and over-approximates; the paper's *semantic* interference check, which would let two increases of one fluent commute, is the extension point (`InterferenceGraph.disables`). Each step of a model is serialised in a topological order of its disabling graph and the UP validator checks that order. Temporal tasks are refused: happenings are built on one snap action per step.
+What the propagator knows about an action is read off the ground facts in the solver — `precondition`, `postcondition`, the disjunctive layer's `orDisjunct`, the numeric layer's effects and comparisons — so the layer files carry no vocabulary for it. An action *reads* the variables of its preconditions, of its conditional effects' conditions and of every literal of its disjunctive conditions, and *writes* every effect, conditional or not; `a` disables `b` when it writes a variable `b` reads to another value than `b` reads, or when both write one variable to different values. Numeric fluents are value-less: a numeric write disables every reader and conflicts with every other writer (the numeric layer's unconditional effects do not sum). All of this is syntactic and over-approximates; the paper's *semantic* interference check, which would let two increases of one fluent commute, is the extension point (`InterferenceGraph.disables`). Each step of a model is serialised in a topological order of its disabling graph and the UP validator checks that order.
 
-`parallel="sequential"` completes the matrix: the same one-action-per-step reading as the default, but with core's cardinality constraint dropped and the propagator rejecting any two actions in one step. It admits exactly the same plans and exists to measure the propagator's overhead against clasp's native cardinality constraint.
-
-On the bundled gripper the exists-step reading needs 2 steps for a 5-action plan where the sequential reading needs 5; on a 6-ball gripper, 6 steps and 0.13s against 17 steps and 32s. The benchmark configuration carries both readings as [plasp-seq-exists.json](benchmarks/planners/plasp-seq-exists.json) and [plasp-seq-forall.json](benchmarks/planners/plasp-seq-forall.json).
+On the bundled gripper `exists` needs 2 steps for a 5-action plan and `forall` 3, where `seq` needs 5; on a 6-ball gripper, 6 steps and 0.13s (`exists`) and 11 steps and 1.6s (`forall`) against 17 steps and 32s. The benchmark configuration carries the three families as [plasp-seq.json](benchmarks/planners/plasp-seq.json), [plasp-forall.json](benchmarks/planners/plasp-forall.json) and [plasp-exists.json](benchmarks/planners/plasp-exists.json).

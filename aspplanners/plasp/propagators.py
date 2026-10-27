@@ -14,10 +14,11 @@ Both need interference constraints between actions. Encoding them up front is
 the classical approach, and the number of mutexes -- quadratic in the actions,
 per step -- is what dominates the size of the program. This module instead
 follows Abdelwahed, Bofill, Espasa & Villaret, "On-Demand Mutex Constraints for
-Numeric Planning as SMT" (ICAPS 2026): the encoding states no interference at
-all (core.lp's step choice becomes `1 {occurs(A, t)}`), and a propagator plugged
-into the solver's search watches the action atoms, keeps the set of actions
-active at each step, and reacts when the solver makes an action true:
+Numeric Planning as SMT" (ICAPS 2026): the `forall` and `exists` encoding
+families state no interference at all (their core.lp's step choice is
+`1 {occurs(A, t)}`), and a propagator plugged into the solver's search watches
+the action atoms, keeps the set of actions active at each step, and reacts when
+the solver makes an action true:
 
   * the forall propagator raises a conflict as soon as the new action interferes
     with one already active at the same step (the paper's Algorithm 1);
@@ -35,11 +36,6 @@ precomputes the whole disabling graph at the first `init` instead, for
 comparison, which is the paper's eager baseline with the mutexes still added
 lazily.
 
-A third semantics, `sequential`, completes the matrix: one action per step, as
-core's own cap states it, but enforced by the propagator instead -- any two
-actions active in one step are a conflict, with no interference to judge. It
-exists to measure the propagator's overhead against clasp's native cardinality
-constraint, since the two admit exactly the same plans.
 
 What the propagator knows about an action is read off the ground task facts in
 the solver's symbolic atoms (`precondition/3`, `postcondition/4`, the
@@ -86,7 +82,7 @@ import clingo
 # with any read of it or write to it.
 ANY = object()
 
-SEMANTICS = ('exists', 'forall', 'sequential')
+SEMANTICS = ('exists', 'forall')
 INTERFERENCE = ('lazy', 'eager')
 
 
@@ -278,7 +274,7 @@ class ParallelStepPropagator:
     # -- clingo.Propagator interface -------------------------------------
 
     def init(self, init) -> None:
-        if self.graph is None and self.semantics != 'sequential':
+        if self.graph is None:
             self.graph = InterferenceGraph(init.symbolic_atoms, self.interference)
         for atom in init.symbolic_atoms.by_signature('occurs', 2):
             literal = init.solver_literal(atom.literal)
@@ -298,9 +294,7 @@ class ParallelStepPropagator:
             for action, step in self._literal_atoms[literal]:
                 step_actions = active.setdefault(step, {})
                 step_actions[action] = literal
-                if self.semantics == 'sequential':
-                    ok = self._check_sequential(control, action, literal, step_actions)
-                elif self.semantics == 'forall':
+                if self.semantics == 'forall':
                     ok = self._check_forall(control, action, literal, step_actions)
                 else:
                     ok = self._check_exists(control, action, step_actions)
@@ -313,17 +307,7 @@ class ParallelStepPropagator:
             for action, step in self._literal_atoms[literal]:
                 active.get(step, {}).pop(action, None)
 
-    # -- the checks --------------------------------------------------------
-
-    def _check_sequential(self, control, action, literal, step_actions) -> bool:
-        """One action per step: every other active action is a conflict."""
-        for other, other_literal in list(step_actions.items()):
-            if other is action:
-                continue
-            self.conflicts += 1
-            if not control.add_nogood([literal, other_literal]) or not control.propagate():
-                return False
-        return True
+    # -- the two checks ----------------------------------------------------
 
     def _check_forall(self, control, action, literal, step_actions) -> bool:
         """Algorithm 1: a conflict for every active action the new one
@@ -369,17 +353,9 @@ class ParallelStepPropagator:
     # -- for the planner ---------------------------------------------------
 
     def serialise(self, actions: Sequence[clingo.Symbol]) -> List[clingo.Symbol]:
-        if self.semantics == 'sequential':
-            if len(actions) > 1:
-                raise ValueError(
-                    f"A sequential step holds {[str(a) for a in actions]}; the propagator "
-                    "should have rejected it.")
-            return list(actions)
         return self.graph.serialise(actions)
 
     def statistics(self) -> str:
-        if self.semantics == 'sequential':
-            return f"sequential, cap enforced by the propagator: {self.conflicts} conflicts raised"
         graph = self.graph
         return (f"{self.semantics}-step, {self.interference} interference: "
                 f"{self.conflicts} mutex conflicts raised, "

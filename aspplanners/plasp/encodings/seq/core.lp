@@ -67,19 +67,7 @@ holds(Variable, Value, 0) :- initialState(Variable, Value).
 
 #program step(t).
 
-% At least one action per step. Whether a step may carry *more* than one is a
-% property of the horizon semantics, not of the task: the sequential reading
-% caps a step at one action; under a parallel reading (forall-step or
-% exists-step) the planner asserts parallelSteps/0 into base, which drops the
-% cap, and registers a propagator (aspplanners/plasp/propagators.py) that
-% states, lazily and during search, which actions may share a step -- the
-% on-demand mutex approach of Abdelwahed, Bofill, Espasa & Villaret (ICAPS
-% 2026). The cap is a separate constraint rather than the upper bound of the
-% choice so that it can be switched off: rules only ever add to a program, so a
-% `1 {...} 1` here could not be relaxed from outside.
-#defined parallelSteps/0.
-1 {occurs(Action, t) : action(Action)}.
-:- not parallelSteps, 2 {occurs(Action, t) : action(Action)}.
+1 {occurs(Action, t) : action(Action)} 1.
 
 % Check preconditions
 :- occurs(Action, t), precondition(Action, Variable, Value), not holds(Variable, Value, t - 1).

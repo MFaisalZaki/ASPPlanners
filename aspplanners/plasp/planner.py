@@ -12,14 +12,17 @@ from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
-from aspplanners.plasp.propagators import SEMANTICS, INTERFERENCE, ParallelStepPropagator
+from aspplanners.plasp.propagators import INTERFERENCE, ParallelStepPropagator
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
 # encoding family -> the encoder that produces its facts. Which *layers* of the
-# family get loaded is decided per task; see aspplanners.plasp.layers.
+# family get loaded is decided per task; see aspplanners.plasp.layers. The
+# parallel families read the same facts as seq, so they share the encoder.
 ENCODERS = {
     'seq': PLASPEncoder,
+    'forall': PLASPEncoder,
+    'exists': PLASPEncoder,
 }
 
 
@@ -34,29 +37,26 @@ class PLASPPlanner:
     names them. Either way the resolved layers are in `self.layers` and the files
     they load from in `self.encoding_paths`; see `aspplanners.plasp.layers`.
 
-    `parallel` switches the horizon from one action per step to a set of
-    actions per step: ``'exists'`` (exists-step: the step can be executed in
-    some order) or ``'forall'`` (forall-step: in any order); ``'sequential'``
-    keeps one action per step but has the propagator enforce the cap instead
-    of core's cardinality constraint, to measure the one against the other
-    (same plans, same horizons as the default). The interference
-    constraints that make a set legal are not in the encoding; a propagator
-    generates them on demand during search (`aspplanners.plasp.propagators`,
-    after Abdelwahed, Bofill, Espasa & Villaret, ICAPS 2026). `interference`
-    is ``'lazy'`` (judge a pair of actions the first time the solver puts them
-    together) or ``'eager'`` (judge every pair up front; the mutexes are still
-    added on demand). Not available on temporal tasks, whose happenings are
-    built on one snap action per step. The horizon a plan was found at is in
-    `self.solved_horizon`: its length under the sequential reading, its
-    number of parallel steps otherwise.
+    The families differ in how a horizon step is read. ``'seq'`` holds one
+    action per step. ``'forall'`` and ``'exists'`` hold a set of actions per
+    step -- forall-step: no two of them interfere, so any order works;
+    exists-step: some order works -- and leave what makes a set legal to a
+    propagator that generates the interference constraints on demand during
+    search (`aspplanners.plasp.propagators`, after Abdelwahed, Bofill, Espasa
+    & Villaret, ICAPS 2026). For those, `interference` is ``'lazy'`` (judge a
+    pair of actions the first time the solver puts them together) or
+    ``'eager'`` (judge every pair up front; the mutexes are still added on
+    demand). Neither takes a temporal task: happenings are built on one snap
+    action per step. The horizon a plan was found at is in
+    `self.solved_horizon`: its length under seq, its number of parallel
+    steps otherwise.
 
     The solve status of the last `plan()` call is kept in `self.status`
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
     """
 
     def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None,
-                 time_scale: int = DEFAULT_TIME_SCALE, parallel: Optional[str] = None,
-                 interference: str = 'lazy'):
+                 time_scale: int = DEFAULT_TIME_SCALE, interference: str = 'lazy'):
         family_name, explicit_layers = parse_selection(encoder_type)
         if family_name not in ENCODERS:
             raise ValueError(
@@ -82,25 +82,16 @@ class PLASPPlanner:
         # the compiled task's vocabulary (the encoder guarantees injectivity).
         self._actions_by_asp_name = {asp_name(a.name): a for a in self.task.actions}
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
-        self.parallel = self._check_parallel(parallel, interference)
+        # The step semantics the family leaves to a propagator ('forall',
+        # 'exists'), or None when its encoding is complete on its own (seq).
+        self.parallel = self.family.propagator
+        if interference not in INTERFERENCE:
+            raise ValueError(f"interference must be one of {INTERFERENCE}, not {interference!r}")
         self.interference = interference
         self._propagator: Optional[ParallelStepPropagator] = None
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
         self.solved_horizon: Optional[int] = None
-
-    def _check_parallel(self, parallel: Optional[str], interference: str) -> Optional[str]:
-        if parallel is None:
-            return None
-        if parallel not in SEMANTICS:
-            raise ValueError(f"parallel must be None or one of {SEMANTICS}, not {parallel!r}")
-        if interference not in INTERFERENCE:
-            raise ValueError(f"interference must be one of {INTERFERENCE}, not {interference!r}")
-        if self.compiled_task.is_temporal:
-            raise ValueError(
-                f"parallel={parallel!r} is not available on a temporal task: the temporal "
-                "layer's happenings are built on one snap action per step.")
-        return parallel
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
         """Resolve the encoding layers for this task, explicit or inferred.
@@ -183,14 +174,12 @@ class PLASPPlanner:
         assign the external `query(h)` to true for a fixed-horizon solve.
         The facts come first so they belong to the implicit base part.
 
-        Under a parallel reading the program carries the `parallelSteps.` fact
-        that drops core's one-action cap, and nothing else about interference:
-        that is the propagator's job, so solving this text on its own admits
-        steps of interfering actions. Register a `ParallelStepPropagator`.
+        A parallel family's program states nothing about interference: that is
+        the propagator's job, so solving this text on its own admits steps of
+        interfering actions. Register a `ParallelStepPropagator` for the
+        family's semantics (`self.parallel`).
         """
         sections = [f"%% Task facts\n{self.task_facts}"]
-        if self.parallel:
-            sections.append(f"%% Parallel steps ({self.parallel}-step, enforced by the propagator)\n{self._parallel_facts()}")
         for name, path in zip(self.layers, self.encoding_paths):
             with open(path, 'r') as f:
                 sections.append(f"%% Layer: {name}\n{f.read()}")
@@ -215,20 +204,15 @@ class PLASPPlanner:
             with open(destination, 'w') as f:
                 f.write(program)
 
-    @staticmethod
-    def _parallel_facts() -> str:
-        return 'parallelSteps.'
-
     def _control(self) -> clingo.Control:
-        """A Control with the encoding loaded, the task facts added and, under
-        a parallel reading, the cap dropped and the propagator registered."""
+        """A Control with the encoding loaded, the task facts added and, for a
+        parallel family, its propagator registered."""
         ctl = clingo.Control(arguments=['-n', '1'])
         for path in self.encoding_paths:
             ctl.load(path)
         ctl.add('base', [], self.task_facts)
         self._propagator = None
         if self.parallel:
-            ctl.add('base', [], self._parallel_facts())
             self._propagator = ParallelStepPropagator(self.parallel, self.interference)
             ctl.register_propagator(self._propagator)
         return ctl
@@ -363,7 +347,7 @@ class PLASPPlanner:
         A temporal task yields a `TimeTriggeredPlan`, everything else a
         `SequentialPlan`.
 
-        Under a parallel reading a step holds several actions, and the order
+        Under a parallel family a step holds several actions, and the order
         they are serialised in is the one the step is legal under: a
         topological order of the propagator's disabling graph (any order, for
         forall-step, where no two of them interfere). The validator then
@@ -378,7 +362,7 @@ class PLASPPlanner:
         ordered = []
         for step in sorted(by_step):
             actions = by_step[step]
-            if self._propagator is not None:
+            if self._propagator is not None and len(actions) > 1:
                 actions = self._propagator.serialise(actions)
             ordered.extend(actions)
         steps = [self._construct_action(self._action_tuple(clingo.Function('occurs', [a, clingo.Number(0)])))

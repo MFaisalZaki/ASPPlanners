@@ -203,11 +203,25 @@ class EncodingFamily:
     `layers` is in dependency order: a layer never precedes one it requires, and
     that order is also the load order, so ``core.lp`` -- which declares the
     program parts and the ``query(t)`` external -- is always first.
+
+    `propagator` names the step semantics a family leaves to a clingo
+    propagator rather than to its rules: ``'forall'`` or ``'exists'`` (see
+    :mod:`aspplanners.plasp.propagators`), or None for a family whose encoding
+    is complete on its own (seq). The planner registers the propagator and
+    serialises each step of a model in an order it vouches for.
+
+    `unsupported` names the fact vocabulary this family has no layer for, by
+    the name of the feature it belongs to, with the reason. A task emitting one
+    of those facts is refused with that reason at construction -- the generic
+    coverage error would say the registry has drifted, when what is true is
+    that the family does not take the task.
     """
     name: str
     directory: str
     layers: Tuple[Layer, ...]
     base: str = 'core'
+    propagator: Optional[str] = None
+    unsupported: Tuple[Tuple[str, FrozenSet[str], str], ...] = ()
 
     @property
     def by_name(self) -> Dict[str, Layer]:
@@ -303,6 +317,12 @@ class EncodingFamily:
 
     def check_coverage(self, predicates: Set[str], names: Sequence[str]) -> None:
         """Raise unless every emitted fact has a layer that reads it."""
+        for feature, vocabulary, reason in self.unsupported:
+            if predicates & vocabulary:
+                raise ValueError(
+                    f"The {self.name} encoding has no {feature} layer: {reason}. This task "
+                    f"emits {sorted(predicates & vocabulary)}, so it cannot be solved with "
+                    f"{self.name!r}; use the 'seq' encoding for it.")
         missing = self.unowned(predicates, names)
         if missing:
             culprits = sorted(
@@ -325,7 +345,48 @@ SEQ = EncodingFamily(
     layers=SEQ_LAYERS,
 )
 
-FAMILIES: Dict[str, EncodingFamily] = {SEQ.name: SEQ}
+_SEQ_BY_NAME = {layer.name: layer for layer in SEQ_LAYERS}
+
+
+def _parallel_family(name: str, semantics: str) -> EncodingFamily:
+    """A family that reads a horizon step as a set of actions.
+
+    The seq encoding with its step choice relaxed and the step semantics
+    (forall-step or exists-step) enforced by a propagator; see
+    ``encodings/<name>/core.lp``. It keeps its own copies of the .lp files
+    rather than sharing seq's, so the directory is the whole encoding. Its
+    layers own exactly what seq's do -- the task facts are the same, only the
+    step rules differ -- so the ownership sets are taken from the seq registry
+    rather than restated. There is no temporal layer: the temporal encoding's
+    happenings are built on one snap action per step.
+    """
+    core, numeric, disjunctive, temporal = (
+        _SEQ_BY_NAME[n] for n in ('core', 'numeric', 'disjunctive', 'temporal'))
+    layers = (
+        Layer(name='core', filename='core.lp',
+              summary=f'multi-valued STRIPS, a set of actions per step under {semantics} '
+                      'semantics (enforced by the propagator)',
+              owns=core.owns, describes_instance=core.describes_instance),
+        Layer(name='numeric', filename='numeric.lp', summary=numeric.summary,
+              requires=('core',), owns=numeric.owns, kind_features=numeric.kind_features),
+        Layer(name='disjunctive', filename='disjunctive.lp', summary=disjunctive.summary,
+              requires=('core',), owns=disjunctive.owns, kind_features=disjunctive.kind_features),
+    )
+    return EncodingFamily(
+        name=name,
+        directory=os.path.join(ENCODINGS_DIR, name),
+        layers=layers,
+        propagator=semantics,
+        unsupported=(
+            ('temporal', temporal.owns, "happenings are built on one snap action per step"),
+        ),
+    )
+
+
+FORALL = _parallel_family('forall', 'forall')
+EXISTS = _parallel_family('exists', 'exists')
+
+FAMILIES: Dict[str, EncodingFamily] = {f.name: f for f in (SEQ, FORALL, EXISTS)}
 
 
 def parse_selection(spec: str) -> Tuple[str, Optional[Tuple[str, ...]]]:
@@ -333,6 +394,7 @@ def parse_selection(spec: str) -> Tuple[str, Optional[Tuple[str, ...]]]:
 
     ``'seq'``                   -> ``('seq', None)``  (layers chosen automatically)
     ``'seq+numeric+temporal'``  -> ``('seq', ('numeric', 'temporal'))``
+    ``'exists'``                -> ``('exists', None)``  (likewise ``'forall'``)
 
     ``None`` for the layers means "decide from the task"; an explicit list is
     still closed under `requires` and still coverage-checked, so forcing a set
