@@ -10,6 +10,7 @@ from unified_planning.plans import SequentialPlan, TimeTriggeredPlan, ActionInst
 from aspplanners.common.errors import refusal_from_clingo_error
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
+from aspplanners.plasp.lifted import LiftedEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
@@ -19,6 +20,7 @@ from aspplanners.common.validation import validate_plan
 # family get loaded is decided per task; see aspplanners.plasp.layers.
 ENCODERS = {
     'seq': PLASPEncoder,
+    'lifted': LiftedEncoder,
 }
 
 
@@ -30,8 +32,12 @@ class PLASPPlanner:
 
     `encoder_type` names the encoding family and, optionally, its layers:
     ``'seq'`` picks the layers from the task itself, ``'seq+numeric+temporal'``
-    names them. Either way the resolved layers are in `self.layers` and the files
-    they load from in `self.encoding_paths`; see `aspplanners.plasp.layers`.
+    names them. ``'lifted'`` is the lifted encoding (a schema and its
+    arguments chosen per step, never a ground action; classical tasks only,
+    see `aspplanners.plasp.lifted`). Either way the resolved layers are in
+    `self.layers` and the files they load from in `self.encoding_paths`; see
+    `aspplanners.plasp.layers`. The horizon a plan was found at is in
+    `self.solved_horizon`.
 
     The solve status of the last `plan()` call is kept in `self.status`
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
@@ -53,6 +59,9 @@ class PLASPPlanner:
         self.task          = self.compiled_task.problem
         # The task facts never change across horizons: build the string once.
         self.task_facts    = '\n'.join(sorted(self.compiled_task.fact_lines))
+        # The lifted encoding's per-schema rules of the step(t) part; empty
+        # for every other encoding.
+        self.step_rules    = '\n'.join(self.compiled_task.step_rules)
         # Which layers of the encoding this task needs. Driven by the facts the
         # encoder actually emitted, widened by what the compiled problem's kind
         # suggests, and then checked for coverage -- an emitted fact that no
@@ -66,6 +75,7 @@ class PLASPPlanner:
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
+        self.solved_horizon: Optional[int] = None
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
         """Resolve the encoding layers for this task, explicit or inferred.
@@ -146,12 +156,16 @@ class PLASPPlanner:
         The encoding is multi-shot (`#program base/step(t)/check(t)`): ground
         it with parts [('base', []), ('step', [1..h]), ('check', [h])] and
         assign the external `query(h)` to true for a fixed-horizon solve.
-        The facts come first so they belong to the implicit base part.
+        The facts come first so they belong to the implicit base part; the
+        lifted encoding's per-schema step rules come last, under their own
+        `#program step(t).`
         """
         sections = [f"%% Task facts\n{self.task_facts}"]
         for name, path in zip(self.layers, self.encoding_paths):
             with open(path, 'r') as f:
                 sections.append(f"%% Layer: {name}\n{f.read()}")
+        if self.step_rules:
+            sections.append(f"%% Task step rules (lifted)\n#program step(t).\n{self.step_rules}")
         return '\n\n'.join(sections)
 
     def encoding_terms(self) -> List[ASPStatement]:
@@ -199,6 +213,8 @@ class PLASPPlanner:
         for path in self.encoding_paths:
             ctl.load(path)
         ctl.add('base', [], self.task_facts)
+        if self.step_rules:
+            ctl.add('step', ['t'], self.step_rules)
 
         if horizon is not None:
             parts = [('base', []), ('check', [clingo.Number(horizon)])]
@@ -290,6 +306,7 @@ class PLASPPlanner:
             self.logs.append(f'Plan validation failed: {reason}')
             return self._empty_plan()
         self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
+        self.solved_horizon = horizon
         return _plan
 
     # ------------------------------------------------------------------
@@ -305,9 +322,12 @@ class PLASPPlanner:
         """
         if self.compiled_task.is_temporal:
             return self._extract_time_triggered_plan(symbols)
-        occurs = sorted((s for s in symbols if s.match('occurs', 2)),
-                        key=lambda s: s.arguments[1].number)
-        steps = [self._construct_action(self._action_tuple(s)) for s in occurs]
+        if self.compiled_task.lifted:
+            steps = [self._construct_action(t) for t in self._lifted_action_tuples(symbols)]
+        else:
+            occurs = sorted((s for s in symbols if s.match('occurs', 2)),
+                            key=lambda s: s.arguments[1].number)
+            steps = [self._construct_action(self._action_tuple(s)) for s in occurs]
         _plan = SequentialPlan(steps)
         return _plan.replace_action_instances(self.compiled_task.map_back_action_instance)
 
@@ -355,6 +375,20 @@ class PLASPPlanner:
 
         _plan = TimeTriggeredPlan([tuple(step) for step in steps])
         return _plan.replace_action_instances(self.compiled_task.map_back_action_instance)
+
+    @staticmethod
+    def _lifted_action_tuples(symbols) -> list:
+        """schema("name", T) and arg("name", I, constant("o"), T) -> (name, o1, ...)
+        per step, in step order."""
+        names, args = {}, {}
+        for s in symbols:
+            if s.match('schema', 2):
+                names[s.arguments[1].number] = s.arguments[0].string
+            elif s.match('arg', 4):
+                args.setdefault(s.arguments[3].number, {})[s.arguments[1].number] = \
+                    s.arguments[2].arguments[0].string
+        return [(names[t], *[args.get(t, {})[i] for i in sorted(args.get(t, {}))])
+                for t in sorted(names)]
 
     @staticmethod
     def _action_tuple(occurs_symbol) -> tuple:

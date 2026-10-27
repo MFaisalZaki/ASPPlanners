@@ -120,6 +120,14 @@ class ASPEncodingResult:
     # a task can be temporal and still have every durative action pruned as
     # unreachable, and its plans are still validated as schedules.
     is_temporal: bool = False
+    # The lifted encoding (aspplanners.plasp.lifted) states preconditions and
+    # effects as rules of the step(t) program part rather than as facts; they
+    # are kept apart from `facts` so the fact vocabulary stays what the
+    # registry's coverage check reads. Empty for every other encoding.
+    step_rules: List[str] = field(default_factory=list)
+    # Whether a model names its actions as schema/2 + arg/4 (lifted) rather
+    # than occurs/2; decides how the planner reads a plan off it.
+    lifted: bool = False
 
     @property
     def fact_lines(self) -> Set[str]:
