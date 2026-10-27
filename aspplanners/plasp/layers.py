@@ -361,6 +361,17 @@ LIFTED_LAYERS: Tuple[Layer, ...] = (
         }),
         describes_instance=_SEQ_BY_NAME['core'].describes_instance,
     ),
+    # The numeric layer keyed by expression and fluent (numval, numValue, the
+    # delta sum, the goals); the lifted encoder states a schema's comparisons
+    # and effects as step rules, and declares expressions with numValueNeeded.
+    Layer(
+        name='numeric',
+        filename='numeric.lp',
+        summary=_SEQ_BY_NAME['numeric'].summary,
+        requires=('core',),
+        owns=frozenset({'numVariable', 'numConst', 'numTerm', 'numGoal', 'numValueNeeded'}),
+        kind_features=_SEQ_BY_NAME['numeric'].kind_features,
+    ),
 )
 
 LIFTED = EncodingFamily(
@@ -368,11 +379,9 @@ LIFTED = EncodingFamily(
     directory=os.path.join(ENCODINGS_DIR, 'lifted'),
     layers=LIFTED_LAYERS,
     unsupported=(
-        ('numeric', _SEQ_BY_NAME['numeric'].owns | frozenset(PREDICATE_REQUIRES),
-         "its fluents would need the numeric layer restated per schema"),
-        ('disjunctive', _SEQ_BY_NAME['disjunctive'].owns,
+        ('disjunctive', _SEQ_BY_NAME['disjunctive'].owns | frozenset({'orDisjunctNum', 'goalOrDisjunctNum'}),
          "disjunctive conditions would need the disjunctive layer restated per schema"),
-        ('temporal', _SEQ_BY_NAME['temporal'].owns,
+        ('temporal', _SEQ_BY_NAME['temporal'].owns | frozenset({'numOverall'}),
          "happenings are built on one ground snap action per step"),
     ),
 )

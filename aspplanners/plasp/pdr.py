@@ -52,8 +52,36 @@ import clingo
 Cube = FrozenSet[Tuple[clingo.Symbol, bool]]
 State = FrozenSet[clingo.Symbol]
 
-NOOP = clingo.Function('action', [clingo.String('pdrNoop')])
+NOOP_NAME = 'pdrNoop'
 TRUE = clingo.Function('true')
+
+
+def read_seq_action(symbols):
+    """The action of a one-step model of the seq family, as a (name, objects...)
+    tuple, or None for the do-nothing action."""
+    occurs = next(s for s in symbols if s.match('occurs', 2))
+    term = occurs.arguments[0].arguments[0]
+    if term.type == clingo.SymbolType.String:
+        return None if term.string == NOOP_NAME else (term.string,)
+    name = term.arguments[0].string
+    args = [a.arguments[0].string if a.type == clingo.SymbolType.Function and a.name == 'constant'
+            else (a.string if a.type == clingo.SymbolType.String else str(a))
+            for a in term.arguments[1:]]
+    return (name, *args)
+
+
+def read_lifted_action(symbols):
+    """The action of a one-step model of the lifted family: the schema chosen
+    at step 1 with its arguments by position, or None for the do-nothing one."""
+    name, args = None, {}
+    for s in symbols:
+        if s.match('schema', 2):
+            name = s.arguments[0].string
+        elif s.match('arg', 4):
+            args[s.arguments[1].number] = s.arguments[2].arguments[0].string
+    if name == NOOP_NAME:
+        return None
+    return (name, *[args[i] for i in sorted(args)])
 
 
 def _fluent_name(variable: clingo.Symbol) -> str:
@@ -82,10 +110,14 @@ class PDR:
 
     `ctl` is a Control with the task's layers and pdr.lp loaded and the task
     facts (initial state renamed, statics kept) added, nothing grounded yet.
+    `read_action` turns a one-step model into a (name, objects...) tuple, or
+    None for the do-nothing action: `read_seq_action` or `read_lifted_action`.
     """
 
-    def __init__(self, ctl: clingo.Control, static_fluents: Set[str] = frozenset()):
+    def __init__(self, ctl: clingo.Control, static_fluents: Set[str] = frozenset(),
+                 read_action: Callable = read_seq_action):
         self.ctl = ctl
+        self.read_action = read_action
         ctl.ground([('base', []), ('step', [clingo.Number(1)]), ('check', [clingo.Number(1)])])
         atoms = ctl.symbolic_atoms
         self.variables: List[clingo.Symbol] = sorted(
@@ -170,7 +202,7 @@ class PDR:
 
         def on_model(model):
             symbols = model.symbols(atoms=True)
-            found['action'] = next(s.arguments[0] for s in symbols if s.match('occurs', 2))
+            found['action'] = self.read_action(symbols)   # None for the do-nothing action
             found['successor'] = frozenset(
                 s.arguments[0] for s in symbols
                 if s.match('holds', 3) and s.arguments[2].number == 1
@@ -234,14 +266,14 @@ class PDR:
     # ------------------------------------------------------------------
 
     def run(self, max_layers: int, deadline: Optional[float] = None):
-        """('plan', [action symbols]) | ('unsolvable', layer) |
+        """('plan', [(name, objects...) tuples]) | ('unsolvable', layer) |
         ('exhausted', max_layers) | ('timeout', layer)."""
         self.deadline = deadline
         self.max_layers = max_layers
         first = self.extend(self.initial, 1)
         if first[0] == 'timeout':
             return ('timeout', 1)
-        if first[0] == 'sat' and first[1] == NOOP:
+        if first[0] == 'sat' and first[1] is None:
             return ('plan', [])
         for k in range(1, max_layers + 1):
             outcome = self._solve_layer(k)
@@ -273,7 +305,7 @@ class PDR:
             if result[0] == 'sat':
                 _, action, successor = result
                 if level == 1:
-                    return ('plan', [a for a in node.path() + [action] if a != NOOP])
+                    return ('plan', [a for a in node.path() + [action] if a is not None])
                 heapq.heappush(heap, (level, next(counter), node))
                 heapq.heappush(heap, (level - 1, next(counter), _Obligation(level - 1, successor, node, action)))
                 continue

@@ -1,13 +1,13 @@
 """Tests for the `lifted` encoding family (aspplanners.plasp.lifted).
 
 A step chooses a schema and one object per parameter position; every
-precondition and effect is a step rule joining only the arguments its literal
-mentions, so no ground action is ever named. Pinned here: (1) the same plans
-and horizons as seq on every classical task the fixtures and bundled domains
-offer -- the two encodings are the same semantics -- with validated plans;
-(2) the shape of the emitted rules, literal for literal; (3) that the step
-program is smaller than seq's where action arity exceeds predicate arity;
-(4) the refusals, with their reasons.
+precondition and effect, boolean or numeric, is a step rule joining only the
+arguments its literal mentions, so no ground action is ever named. Pinned
+here: (1) the same plans and horizons as seq on every classical and numeric
+task the fixtures and bundled domains offer -- the two encodings are the same
+semantics -- with validated plans; (2) the shape of the emitted rules, literal
+for literal; (3) that the step program is smaller than seq's where action
+arity exceeds predicate arity; (4) the refusals, with their reasons.
 """
 
 import os
@@ -28,7 +28,7 @@ from aspplanners.plasp.planner import PLASPPlanner
 
 from test_planner import (
     disjunction_problem, forall_problem, negative_precondition_problem,
-    numeric_counter_problem, robot_line_problem,
+    numeric_counter_problem, robot_line_problem, rover_recharge_problem,
 )
 
 PDDL_DIR = os.path.join(os.path.dirname(__file__), "pddl")
@@ -109,8 +109,20 @@ def test_conditional_effects_fire_per_binding_and_the_equality_holds():
     assert all(str(a.actual_parameters[0]) != "special" for a in plan.actions if a.action.name == "prepare")
 
 
-@pytest.mark.parametrize("domain", ["alarm", "blocksworld", "gripper", "transport"])
-def test_bundled_classical_domains_solve_as_under_seq(domain):
+@pytest.mark.parametrize("make_problem", [
+    lambda: numeric_counter_problem(3),
+    lambda: numeric_counter_problem(7),
+    rover_recharge_problem,
+    lambda: rover_recharge_problem(with_bool_goal=True),
+])
+def test_numeric_fixtures_solve_as_under_seq(make_problem):
+    planner, _ = assert_same_as_seq(make_problem())
+    assert planner.layers == ("core", "numeric")
+
+
+@pytest.mark.parametrize("domain", ["alarm", "blocksworld", "gripper", "transport",
+                                    "rover", "zenoflight", "tradepost"])
+def test_bundled_classical_and_numeric_domains_solve_as_under_seq(domain):
     for problem in sorted(f for f in os.listdir(os.path.join(PDDL_DIR, domain)) if f.startswith("problem")):
         assert_same_as_seq(pddl(domain, problem))
 
@@ -146,6 +158,24 @@ def test_no_ground_action_is_named_and_a_literal_joins_only_its_parameters():
     # and its `carry(OBJ, GRIPPER)` effect joins exactly those two.
     carry = [r for r in rules if r.startswith('caused(variable(("carry"') and '"pick"' in r]
     assert len(carry) == 1 and carry[0].count("arg(") == 2
+
+
+def test_numeric_conditions_and_effects_are_per_schema_step_rules():
+    """rover: `recharge` needs energy below a bound and raises it; `move`
+    spends it. The comparison is a #sum over the expression's terms under the
+    schema's arguments, the effects apply a delta to the value at t-1, and the
+    expressions are declared under the parameters' types, not under a ground
+    action."""
+    planner = PLASPPlanner(pddl("rover"), "lifted")
+    numeric = planner.compiled_task.numeric_step_rules
+    assert numeric and all(r.startswith((":- schema(", "caused(")) for r in numeric)
+    assert any("#sum {" in r and "numval(NV, NX, t-1)" in r for r in numeric)
+    assert any("holds(" in r and "NX +" in r for r in numeric)
+    facts = planner.compiled_task.fact_lines
+    assert any(l.startswith("numTerm(") and ":- has(" in l for l in facts) or \
+        any(l.startswith("numTerm(") and ":-" not in l for l in facts)
+    assert not any(l.startswith(("numPrecondition(", "numEffect(", "numAssign(")) for l in facts)
+    assert not any("occurs(" in r for r in numeric)
 
 
 def test_the_initial_state_carries_the_false_values_the_lifted_rules_read():
@@ -230,21 +260,39 @@ def test_the_lifted_step_program_is_smaller_where_action_arity_exceeds_predicate
 # Registry and refusals
 # ---------------------------------------------------------------------------
 
-def test_the_family_has_one_layer_and_its_own_file():
-    assert LIFTED.layer_names == ("core",)
-    assert LIFTED.directory != SEQ.directory and os.path.isfile(LIFTED.path("core"))
+def test_the_family_has_its_own_files_and_the_numeric_layer_is_seqs_verbatim():
+    assert LIFTED.layer_names == ("core", "numeric")
+    assert LIFTED.directory != SEQ.directory
+    for name in LIFTED.layer_names:
+        assert os.path.isfile(LIFTED.path(name)), name
     assert LIFTED.by_name["core"].describes_instance == SEQ.by_name["core"].describes_instance
+
+    def rules(path):
+        text = open(path).read()
+        return text[text.index("#program base."):]
+    assert rules(LIFTED.path("numeric")) == rules(SEQ.path("numeric"))
 
 
 @pytest.mark.parametrize("make_problem, feature", [
-    (numeric_counter_problem, "numeric"),
     (disjunction_problem, "disjunctive"),
     (lambda: pddl("lift"), "disjunctive"),
+    (lambda: pddl("briefcase", "problem-carry.pddl"), "disjunctive"),
     (lambda: pddl("matchcellar"), "temporal"),
 ])
 def test_tasks_needing_a_missing_layer_are_refused_with_the_reason(make_problem, feature):
     with pytest.raises(ValueError, match=f"has no {feature} layer"):
         PLASPPlanner(make_problem(), "lifted")
+
+
+def test_a_conditional_numeric_effect_is_refused_with_the_reason():
+    from unified_planning.shortcuts import Fluent, IntType
+    problem = numeric_counter_problem(3)
+    tick = problem.action("tick")
+    flag = Fluent("boost", BoolType())
+    problem.add_fluent(flag, default_initial_value=False)
+    tick.add_increase_effect(problem.fluent("counter")(), 2, condition=flag())
+    with pytest.raises(ValueError, match="conditional numeric effect"):
+        PLASPPlanner(problem, "lifted")
 
 
 def test_the_seq_family_is_unchanged():

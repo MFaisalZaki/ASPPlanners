@@ -14,7 +14,7 @@ from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.lifted import LiftedEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
-from aspplanners.plasp.pdr import PDR
+from aspplanners.plasp.pdr import PDR, read_lifted_action, read_seq_action
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
@@ -62,8 +62,10 @@ class PLASPPlanner:
         # The task facts never change across horizons: build the string once.
         self.task_facts    = '\n'.join(sorted(self.compiled_task.fact_lines))
         # The lifted encoding's per-schema rules of the step(t) part; empty
-        # for every other encoding.
-        self.step_rules    = '\n'.join(self.compiled_task.step_rules)
+        # for every other encoding. The numeric ones are kept apart as well so
+        # that PDR's boolean abstraction can leave them out.
+        self.boolean_step_rules = '\n'.join(self.compiled_task.step_rules)
+        self.step_rules    = '\n'.join(self.compiled_task.step_rules + self.compiled_task.numeric_step_rules)
         # Which layers of the encoding this task needs. Driven by the facts the
         # encoder actually emitted, widened by what the compiled problem's kind
         # suggests, and then checked for coverage -- an emitted fact that no
@@ -385,8 +387,8 @@ class PLASPPlanner:
         return '\n'.join(rename(line) for line in sorted(self.compiled_task.fact_lines))
 
     def _check_pdr(self) -> None:
-        if self.family.name != 'seq':
-            raise ValueError(f"search='pdr' is available on the 'seq' encoding, not {self.family.name!r}.")
+        if self.family.name not in ('seq', 'lifted'):
+            raise ValueError(f"search='pdr' is available on the 'seq' and 'lifted' encodings, not {self.family.name!r}.")
         if self.compiled_task.is_temporal or 'temporal' in self.layers:
             raise ValueError("search='pdr' is not available on a temporal task.")
         if 'numeric' in self.layers:
@@ -409,7 +411,12 @@ class PLASPPlanner:
             ctl.load(path)
         ctl.load(self._pdr_path())
         ctl.add('base', [], self._pdr_facts())
+        if self.step_rules:
+            ctl.add('step', ['t'], self.step_rules)
         return ctl
+
+    def _pdr_reader(self):
+        return read_lifted_action if self.compiled_task.lifted else read_seq_action
 
     def _pdr_first(self, budget, max_layers, deadline):
         """Run PDR on the boolean abstraction for at most `budget` seconds.
@@ -430,8 +437,8 @@ class PLASPPlanner:
         constraints was tried and measured, and cost more per step than it
         saved on every instance, so only the plan and the proof are used.
         """
-        if self.family.name != 'seq' or self.compiled_task.is_temporal or 'temporal' in self.layers:
-            self.logs.append('pdr_first skipped: not a seq classical or numeric task.')
+        if self.family.name not in ('seq', 'lifted') or self.compiled_task.is_temporal or 'temporal' in self.layers:
+            self.logs.append('pdr_first skipped: not a seq or lifted classical or numeric task.')
             return None
         numeric = 'numeric' in self.layers
         if numeric and any(line.startswith('orDisjunctNum(effect(') for line in self.compiled_task.fact_lines):
@@ -444,10 +451,14 @@ class PLASPPlanner:
                 ctl.load(path)
         ctl.load(self._pdr_path())
         ctl.add('base', [], self._pdr_facts())
+        if self.boolean_step_rules:
+            # The lifted encoder's boolean step rules; its numeric ones are what
+            # the abstraction leaves out.
+            ctl.add('step', ['t'], self.boolean_step_rules)
         start = time.monotonic()
         run_deadline = start + budget if deadline is None else min(start + budget, deadline)
         try:
-            pdr = PDR(ctl, self._pdr_static_fluents())
+            pdr = PDR(ctl, self._pdr_static_fluents(), self._pdr_reader())
             outcome = pdr.run(max_layers, run_deadline)
         except RuntimeError as error:
             refusal = refusal_from_clingo_error(error)
@@ -473,9 +484,8 @@ class PLASPPlanner:
         return None
 
     def _pdr_plan_from(self, actions):
-        """A validated plan from PDR's action symbols, or None."""
-        steps = [self._construct_action(self._action_tuple(clingo.Function('occurs', [a, clingo.Number(0)])))
-                 for a in actions]
+        """A validated plan from PDR's (name, objects...) tuples, or None."""
+        steps = [self._construct_action(a) for a in actions]
         _plan = SequentialPlan(steps).replace_action_instances(self.compiled_task.map_back_action_instance)
         is_valid, _reason = self.validate(_plan)
         if not is_valid:
@@ -487,7 +497,7 @@ class PLASPPlanner:
     def _plan_pdr(self, max_layers, deadline):
         self._check_pdr()
         try:
-            pdr = PDR(self._pdr_control(), self._pdr_static_fluents())
+            pdr = PDR(self._pdr_control(), self._pdr_static_fluents(), self._pdr_reader())
             outcome = pdr.run(max_layers, deadline)
         except RuntimeError as error:
             refusal = refusal_from_clingo_error(error)
@@ -508,8 +518,7 @@ class PLASPPlanner:
             self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
             self.logs.append(f'No plan found within {max_layers} layers.')
             return self._empty_plan()
-        steps = [self._construct_action(self._action_tuple(clingo.Function('occurs', [a, clingo.Number(0)])))
-                 for a in outcome[1]]
+        steps = [self._construct_action(a) for a in outcome[1]]
         _plan = SequentialPlan(steps).replace_action_instances(self.compiled_task.map_back_action_instance)
         is_valid, reason = self.validate(_plan)
         if not is_valid:

@@ -125,6 +125,9 @@ class ASPEncodingResult:
     # are kept apart from `facts` so the fact vocabulary stays what the
     # registry's coverage check reads. Empty for every other encoding.
     step_rules: List[str] = field(default_factory=list)
+    # The lifted encoding's numeric step rules, apart from the boolean ones so
+    # that PDR's boolean abstraction can leave them out.
+    numeric_step_rules: List[str] = field(default_factory=list)
     # Whether a model names its actions as schema/2 + arg/4 (lifted) rather
     # than occurs/2; decides how the planner reads a plan off it.
     lifted: bool = False
@@ -319,6 +322,10 @@ class PLASPEncoder:
             value_scales=value_scales,
             static_fluents=static_fluent_names,
             value_gcds=stored_value_gcds(new_problem, value_scales))
+        # Kept for an encoder that builds on this compile (the lifted one):
+        # the numeric facts it emits have to be in the same units as these.
+        self.numeric_context = numeric_context
+        self.static_fluent_names = static_fluent_names
 
         time_unit, durative_facts, snap_actions, asp_actions = \
             self._split_durative_actions(new_problem, duration_scales, numeric_context)

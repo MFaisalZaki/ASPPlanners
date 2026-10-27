@@ -21,7 +21,7 @@ from unified_planning.shortcuts import OneshotPlanner
 from unified_planning.engines import PlanGenerationResultStatus
 
 import aspplanners  # noqa: F401
-from aspplanners.plasp.pdr import NOOP, PDR
+from aspplanners.plasp.pdr import PDR
 from aspplanners.plasp.planner import PLASPPlanner
 
 from test_planner import (
@@ -144,7 +144,7 @@ def test_a_reason_is_a_proper_subset_of_the_state_and_a_sat_query_yields_a_succe
     assert all((v in pdr.initial) == positive for v, positive in cube)
     pdr._add_cube(cube, 1)
     sat = pdr.extend(pdr.initial, 2)         # some action leads outside the cube
-    assert sat[0] == "sat" and sat[1] != NOOP
+    assert sat[0] == "sat" and sat[1] is not None
     assert not pdr._blocked(sat[2], 1)
 
 
@@ -152,7 +152,7 @@ def test_the_noop_lets_a_goal_state_pass_a_level_one_query():
     pdr = pdr_instance(pddl("gripper"))
     goal_state = frozenset(v for v in pdr.variables if '"at"' in str(v) and 'room_b' in str(v))
     result = pdr.extend(goal_state | frozenset(v for v in pdr.initial if '"at"' not in str(v)), 1)
-    assert result[0] == "sat" and result[1] == NOOP
+    assert result[0] == "sat" and result[1] is None
 
 
 def test_the_pdr_program_renames_the_initial_state_and_is_standalone(tmp_path):
@@ -299,3 +299,42 @@ def test_pdr_first_through_the_up_engine():
     with OneshotPlanner(name="PLASPPlanner", params={"pdr_first": 30}) as planner:
         result = planner.solve(fuel_gripper(2, 20))
     assert result.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+
+
+# ---------------------------------------------------------------------------
+# PDR on the lifted family
+# ---------------------------------------------------------------------------
+
+def test_pdr_runs_on_the_lifted_family_as_on_seq():
+    for domain in ("gripper", "transport", "blocksworld"):
+        seq = PLASPPlanner(pddl(domain))
+        lifted = PLASPPlanner(pddl(domain), "lifted")
+        seq_plan, lifted_plan = seq.plan(search="pdr", timeout=120), lifted.plan(search="pdr", timeout=120)
+        assert seq.status == lifted.status == PlanGenerationResultStatus.SOLVED_SATISFICING, domain
+        assert len(lifted_plan.actions) == len(seq_plan.actions), domain
+        assert all(a.action.name != "pdrNoop" for a in lifted_plan.actions)
+
+
+def test_pdr_proves_unsolvability_on_the_lifted_family():
+    planner = PLASPPlanner(robot_line_problem(connected_line=False), "lifted")
+    planner.plan(search="pdr")
+    assert planner.status == PlanGenerationResultStatus.UNSOLVABLE_PROVEN
+
+
+def test_pdr_refuses_a_numeric_task_on_the_lifted_family_too():
+    with pytest.raises(ValueError, match="classical tasks only"):
+        PLASPPlanner(numeric_counter_problem(), "lifted").plan(search="pdr")
+
+
+def test_pdr_first_on_the_lifted_family_leaves_the_numeric_step_rules_out():
+    """The abstraction drops the numeric layer and the lifted encoder's
+    numeric step rules alike: the slack fuel gripper yields a valid abstract
+    plan, the tight one falls back to the (numeric) deepening."""
+    slack = PLASPPlanner(fuel_gripper(2, 20), "lifted")
+    plan = slack.plan(pdr_first=30)
+    assert slack.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+    assert "on the boolean abstraction, valid for the task" in slack.logs[0]
+    tight = PLASPPlanner(fuel_gripper(2, 1), "lifted")
+    plan = tight.plan(pdr_first=30)
+    assert tight.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+    assert "not valid for the task" in tight.logs[0] and len(plan.actions) == 5
