@@ -89,7 +89,7 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `search` | PLASP | `"deepening"` | `"pdr"`: property-directed reachability instead of horizon deepening, see [PDR](#property-directed-reachability); classical tasks on `seq`, `max_horizon` bounds its layers |
 | `pdr_first` | PLASP | 0 | seconds of PDR on the task's boolean abstraction before deepening: a proof of unsolvability or a validated plan ends the search, see [PDR first](#pdr-first-on-the-boolean-abstraction); classical and numeric tasks |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
-| `encoder_type` | PLASP | `"seq"` | encoding family |
+| `encoding` | PLASP | `"seq"` | encoding family: `"seq"` or `"lifted"`, see [Encoding families](#encoding-families) |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
 | `timeout` | PLASP only | — | honored by `PLASPPlanner`; **`ABAPlanner` ignores it**, so bound its search with `max_horizon` |
 
@@ -210,9 +210,41 @@ planner = PLASPPlanner(problem, encoder_type="seq", compilationlist=pipeline)
 plan = planner.plan()
 ```
 
+## Encoding families
+
+Two encoding families, one directory each under [aspplanners/plasp/encodings/](aspplanners/plasp/encodings/), share the task facts, the multi-shot structure and the goal test, and differ in how an action is chosen at a step:
+
+| Family | Directory | A step chooses | Layers |
+|---|---|---|---|
+| `seq` | [seq/](aspplanners/plasp/encodings/seq/) | one ground action | core, numeric, disjunctive, temporal |
+| `lifted` | [lifted/](aspplanners/plasp/encodings/lifted/) | one action schema and one object per parameter position | core (classical tasks) |
+
+### The `lifted` family
+
+`seq` instantiates every ground action once, in base, and replicates each step rule per ground action: the step choice ranges over them, and the preconditions and effects are facts keyed by the ground action term that one generic rule per step consumes. A step therefore costs as much as the task has ground actions — objects to the power of the action's arity — before anything is searched.
+
+The `lifted` family (after Höller & Behnke, *Encoding Lifted Classical Planning in Propositional Logic*, ICAPS 2022; see [aspplanners/plasp/lifted.py](aspplanners/plasp/lifted.py)) never names a ground action. A step chooses a schema, `schema(S, t)`, and one object per parameter position, `arg(S, I, O, t)`, and the encoder emits every precondition and effect as a step rule of its own that joins only the argument atoms of the parameters its literal mentions:
+
+```prolog
+:- schema("pick", t), arg("pick", 3, GRIPPER, t),
+   not holds(variable(("free",GRIPPER)), value(variable(("free",GRIPPER)), true), t-1).
+caused(variable(("carry",OBJ,GRIPPER)), value(variable(("carry",OBJ,GRIPPER)), true), t) :-
+   schema("pick", t), arg("pick", 1, OBJ, t), arg("pick", 3, GRIPPER, t).
+```
+
+A literal then costs as many ground instances per step as its predicate has ground atoms, and the step choice one atom per (schema, position, object). From `caused/3` on — add-wins arbitration, inertia, the goal test — [lifted/core.lp](aspplanners/plasp/encodings/lifted/core.lp) is seq's core unchanged, and the semantics is seq's: one action per step, the same plans at the same horizons. The rules come from the same parsers the seq action builder uses, so the two agree literal for literal: positive and negative conditions, `forall` conditions (one constraint per binding), equalities, static preconditions (checked against the initial state), unconditional and conditional effects, `forall` effects, and a `forall` inside a condition (a conditional literal, gringo's conjunction over the bindings).
+
+```python
+planner = PLASPPlanner(problem, "lifted")   # or params={"encoding": "lifted"} through UP
+plan = planner.plan()
+planner.step_rules    # the per-schema rules of step(t); lp_program() dumps them after the layers
+```
+
+It is classical-only in this first version: a task that needs the numeric, disjunctive or temporal layer is refused at construction with that reason, since each of those layers would have to be restated per schema. On a 12-ball, 4-gripper gripper the lifted step program grounds to less than half of seq's atoms; where every action has as many parameters as its predicates (blocksworld's `stack(x, y)` over `on(x, y)`) there is nothing to gain. The benchmark configuration carries it as [plasp-lifted.json](benchmarks/planners/plasp-lifted.json) on the classical track.
+
 ## Encoding layers
 
-The encoding is one `.lp` file per feature, under [aspplanners/plasp/encodings/seq/](aspplanners/plasp/encodings/seq/):
+Within a family the encoding is one `.lp` file per feature; for `seq`, under [aspplanners/plasp/encodings/seq/](aspplanners/plasp/encodings/seq/):
 
 | Layer | File | Covers |
 |---|---|---|
