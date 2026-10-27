@@ -1,3 +1,4 @@
+import os
 import time
 from fractions import Fraction
 from typing import List, Optional, Tuple
@@ -12,6 +13,7 @@ from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
+from aspplanners.plasp.pdr import PDR
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
@@ -66,6 +68,9 @@ class PLASPPlanner:
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
+        # The horizon the last plan() call found its plan at; under PDR, the
+        # target layer at which it was found (plans there may be longer).
+        self.solved_horizon: Optional[int] = None
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
         """Resolve the encoding layers for this task, explicit or inferred.
@@ -177,9 +182,15 @@ class PLASPPlanner:
         """The "no plan" value, of whichever plan class this task produces."""
         return TimeTriggeredPlan([]) if self.compiled_task.is_temporal else SequentialPlan([])
 
-    def plan(self, horizon=None, max_horizon=1000, timeout=None):
+    def plan(self, horizon=None, max_horizon=1000, timeout=None, search='deepening'):
         """Iterative-deepening search over horizons 0..max_horizon, or a single
-        solve at `horizon` when given.
+        solve at `horizon` when given, or -- with ``search='pdr'`` --
+        property-directed reachability over the one-step program (see
+        `aspplanners.plasp.pdr` and ``encodings/seq/pdr.lp``), with
+        `max_horizon` bounding the number of layers. PDR can prove a task
+        unsolvable (`UNSOLVABLE_PROVEN`), which deepening cannot, and takes
+        no fixed `horizon`; it is available on the seq family for tasks
+        without numeric fluents or durative actions.
 
         Deepening is multi-shot: one clingo Control instance grounds only the
         new step(t)/check(t) parts per horizon instead of regrounding the whole
@@ -194,6 +205,12 @@ class PLASPPlanner:
         is SOLVED_SATISFICING.
         """
         deadline = time.monotonic() + timeout if timeout is not None else None
+        if search == 'pdr':
+            if horizon is not None:
+                raise ValueError("search='pdr' has no fixed horizon; use max_horizon to bound its layers.")
+            return self._plan_pdr(max_horizon, deadline)
+        if search != 'deepening':
+            raise ValueError(f"search must be 'deepening' or 'pdr', not {search!r}")
 
         ctl = clingo.Control(arguments=['-n', '1'])
         for path in self.encoding_paths:
@@ -290,6 +307,103 @@ class PLASPPlanner:
             self.logs.append(f'Plan validation failed: {reason}')
             return self._empty_plan()
         self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
+        self.solved_horizon = horizon
+        return _plan
+
+    # ------------------------------------------------------------------
+    # Property-directed reachability
+    # ------------------------------------------------------------------
+
+    def pdr_program(self) -> str:
+        """The one-step program PDR queries: the task facts with the initial
+        state renamed to pdrInitialState/2 (the state at 0 is the query's),
+        the family's layers, and pdr.lp."""
+        self._check_pdr()
+        sections = [f"%% Task facts (initial state renamed for PDR)\n{self._pdr_facts()}"]
+        for name, path in zip(self.layers, self.encoding_paths):
+            with open(path, 'r') as f:
+                sections.append(f"%% Layer: {name}\n{f.read()}")
+        with open(self._pdr_path(), 'r') as f:
+            sections.append(f"%% PDR one-step query program\n{f.read()}")
+        return '\n\n'.join(sections)
+
+    def _pdr_path(self) -> str:
+        return os.path.join(self.family.directory, 'pdr.lp')
+
+    def _pdr_static_fluents(self) -> set:
+        """Fluents no action writes. Their initial facts keep their name: the
+        encoder folds static preconditions into the action signatures as
+        `initialState(...)` body atoms, which would otherwise never hold and
+        drop every such action from the program; and their value is pinned to
+        the initial one in every PDR query rather than left free."""
+        written = {eff.fluent._content.payload.name
+                   for action in self.task.actions for eff in action.effects}
+        # ASP-rendered names: that is how the fact lines and the atoms spell them.
+        return {asp_name(f.name) for f in self.task.fluents if f.name not in written}
+
+    def _pdr_facts(self) -> str:
+        static = self._pdr_static_fluents()
+        prefix = 'initialState(variable(("'
+
+        def rename(line):
+            if not line.startswith('initialState('):
+                return line
+            name = line[len(prefix):].split('"', 1)[0] if line.startswith(prefix) else None
+            if name in static:
+                return line
+            return 'pdrInitialState(' + line[len('initialState('):]
+        return '\n'.join(rename(line) for line in sorted(self.compiled_task.fact_lines))
+
+    def _check_pdr(self) -> None:
+        if self.family.name != 'seq':
+            raise ValueError(f"search='pdr' is available on the 'seq' encoding, not {self.family.name!r}.")
+        if self.compiled_task.is_temporal or 'temporal' in self.layers:
+            raise ValueError("search='pdr' is not available on a temporal task.")
+        if 'numeric' in self.layers:
+            raise ValueError(
+                "search='pdr' is not available on a numeric task: a query's state at time 0 "
+                "would need numeric values that are only known once the obligation arrives, "
+                "after the one-step program has been grounded.")
+
+    def _plan_pdr(self, max_layers, deadline):
+        self._check_pdr()
+        ctl = clingo.Control(arguments=['-n', '1'])
+        for path in self.encoding_paths:
+            ctl.load(path)
+        ctl.load(self._pdr_path())
+        ctl.add('base', [], self._pdr_facts())
+        try:
+            pdr = PDR(ctl, self._pdr_static_fluents())
+            outcome = pdr.run(max_layers, deadline)
+        except RuntimeError as error:
+            refusal = refusal_from_clingo_error(error)
+            if refusal is None:
+                raise
+            raise refusal from error
+        kind = outcome[0]
+        self.logs.append(f'PDR: {kind} ({pdr.statistics()}).')
+        if kind == 'timeout':
+            self.status = PlanGenerationResultStatus.TIMEOUT
+            self.logs.append(f'Timed out while working on layer {outcome[1]}.')
+            return self._empty_plan()
+        if kind == 'unsolvable':
+            self.status = PlanGenerationResultStatus.UNSOLVABLE_PROVEN
+            self.logs.append(f'Layer {outcome[1]} stopped growing: no plan exists.')
+            return self._empty_plan()
+        if kind == 'exhausted':
+            self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
+            self.logs.append(f'No plan found within {max_layers} layers.')
+            return self._empty_plan()
+        steps = [self._construct_action(self._action_tuple(clingo.Function('occurs', [a, clingo.Number(0)])))
+                 for a in outcome[1]]
+        _plan = SequentialPlan(steps).replace_action_instances(self.compiled_task.map_back_action_instance)
+        is_valid, reason = self.validate(_plan)
+        if not is_valid:
+            self.status = PlanGenerationResultStatus.INTERNAL_ERROR
+            self.logs.append(f'Plan validation failed: {reason}')
+            return self._empty_plan()
+        self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
+        self.solved_horizon = len(steps)
         return _plan
 
     # ------------------------------------------------------------------

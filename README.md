@@ -86,6 +86,7 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 |---|---|---|---|
 | `max_horizon` | both | 1000 | upper bound on the iterative-deepening search |
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
+| `search` | PLASP | `"deepening"` | `"pdr"`: property-directed reachability instead of horizon deepening, see [PDR](#property-directed-reachability); classical tasks on `seq`, `max_horizon` bounds its layers |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
 | `encoder_type` | PLASP | `"seq"` | encoding family |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
@@ -230,3 +231,23 @@ planner.encoding_paths  # the .lp files that will be loaded, in load order
 ```
 
 The emitted facts are the authority — they describe the task *as encoded*, after the compilation pipeline, TIM inference, numeric rescaling and the durative split. `ProblemKind` is a second opinion only: it reports declared features rather than the vocabulary the encoding consumes, and the two need not agree (a durative action whose duration reads a fluent produces numeric facts on a problem whose kind has no numeric feature at all). Where they differ, the union wins — an unneeded layer grounds to nothing, while a missing one would be silently ignored.
+
+## Property-directed reachability
+
+Horizon deepening pays for every unsatisfiable horizon on the way to the first satisfiable one, and learns nothing durable from the goal side: everything clingo derives through the goal test of horizon *t* carries the external `query(t)` and dies when that external is released. `search="pdr"` replaces the deepening with property-directed reachability (Bradley 2011; for planning, Suda, *Property Directed Reachability for Automated Planning*, JAIR 2014), which never unrolls the horizon:
+
+* it keeps **layers of blocked cubes** B₁, B₂, …, a cube in Bᵢ being a partial state none of whose completions can reach the goal within *i* steps;
+* it works on **obligations** "state *s* must reach the goal in *i* steps": find an action from *s* whose successor is a goal state (*i* = 1) or not blocked at *i*−1, or, failing that, learn a **reason** — a subset of *s*'s literals that already rules every action out — and block it at *i*;
+* layers are never thrown away, and when a layer stops growing the task is **proven unsolvable** (`UNSOLVABLE_PROVEN`), which deepening can never do.
+
+Every PDR query is a question about one step, so one ground program answers all of them: [encodings/seq/pdr.lp](aspplanners/plasp/encodings/seq/pdr.lp) turns the state at time point 0 into a free choice that each query fixes through solver assumptions (the planner adds the task facts with `initialState` renamed to `pdrInitialState`, so core's own initial-state rule is inert), lets `step(1)` be the seq encoding's own step, adds a do-nothing action so that a goal state counts as reaching the goal, and gates the goal test at time 1 through `query(1)` and each learned cube through a switch atom the query pins on or off. The reason extraction — the hard part of any PDR — is clingo's unsatisfiable core over the state assumptions, shrunk further by dropping literals while the query stays unsatisfiable. The loop around it is [aspplanners/plasp/pdr.py](aspplanners/plasp/pdr.py).
+
+```python
+planner = PLASPPlanner(problem)             # seq encoding
+plan = planner.plan(search="pdr")           # or params={"search": "pdr"} through UP
+planner.status                              # SOLVED_SATISFICING | UNSOLVABLE_PROVEN | ...
+planner.logs[0]                             # 'PDR: plan (41 one-step queries, 9 cubes learned (per layer: {1: 3, 2: 4, 3: 2}))'
+planner.pdr_program()                       # the one-step program, standalone
+```
+
+Plans are not guaranteed shortest: a rescheduled obligation keeps the path it came with, so the plan found at target layer *k* can be longer than *k*. `max_horizon` bounds the number of layers. PDR is available on the `seq` encoding for tasks without numeric fluents or durative actions: a query's state at time 0 would need numeric values that are only known once an obligation arrives, after the one-step program has been grounded. The benchmark configuration carries it as [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) on the classical track.
