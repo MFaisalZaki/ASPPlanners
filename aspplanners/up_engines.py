@@ -62,6 +62,11 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         reachability, see :mod:`aspplanners.plasp.pdr`; classical tasks on
         the seq encoding, ``max_horizon`` bounds its layers, and it can
         report ``UNSOLVABLE_PROVEN``)
+      - ``heuristic`` (``"goal-support"``; default off) -- Rintanen's
+        planning-specific branching rule as the solver's decision heuristic
+        (see :mod:`aspplanners.plasp.heuristics`); seq encoding
+      - ``heuristic_depth`` (int, default 2) -- how deep into the solver's
+        decision levels the rule speaks; None for always
       - ``pdr_first`` (seconds, default 0) -- run PDR on the boolean
         abstraction of the task for at most that long before deepening; a
         proof of unsolvability or a validated plan ends the search, else the
@@ -179,10 +184,13 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         compilationlist = self.conf.get('compilationlist')
         search = self.conf.get('search', 'deepening')
         pdr_first = float(self.conf.get('pdr_first', 0))
+        heuristic = self.conf.get('heuristic')
+        heuristic_depth = self.conf.get('heuristic_depth', 2)
 
         try:
             planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
-                                   time_scale=time_scale)
+                                   time_scale=time_scale, heuristic=heuristic,
+                                   heuristic_depth=heuristic_depth)
             plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout,
                                 search=search, pdr_first=pdr_first)
         except NotImplementedError as refusal:

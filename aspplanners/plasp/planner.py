@@ -14,6 +14,7 @@ from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.lifted import LiftedEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
+from aspplanners.plasp.heuristics import HEURISTICS, GoalSupportHeuristic
 from aspplanners.plasp.pdr import PDR, read_lifted_action, read_seq_action
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
@@ -41,12 +42,26 @@ class PLASPPlanner:
     `aspplanners.plasp.layers`. The horizon a plan was found at is in
     `self.solved_horizon`.
 
+    `heuristic` names a decision heuristic for the horizon search:
+    ``'goal-support'`` is Rintanen's planning-specific branching rule (see
+    `aspplanners.plasp.heuristics`), available on the seq family; None is
+    the solver's own. It changes which model is found first, never which
+    horizon is satisfiable, so plans stay as short as under the default.
+    `heuristic_depth` is how deep into the solver's decision levels the rule
+    speaks (default 2); beyond that the solver's own heuristic decides. The
+    rule is costly to consult and bypasses the solver's learning while it
+    speaks, so a shallow depth is what measured best; None means always.
+    Measured to help on a satisfiable horizon (a third of the default's time
+    on a 6-ball gripper at its horizon) and to hurt under one-step deepening
+    (37s to 63s on the same task), so it is off by default.
+
     The solve status of the last `plan()` call is kept in `self.status`
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
     """
 
     def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None,
-                 time_scale: int = DEFAULT_TIME_SCALE):
+                 time_scale: int = DEFAULT_TIME_SCALE, heuristic: Optional[str] = None,
+                 heuristic_depth: int = 2):
         family_name, explicit_layers = parse_selection(encoder_type)
         if family_name not in ENCODERS:
             raise ValueError(
@@ -77,6 +92,13 @@ class PLASPPlanner:
         # the compiled task's vocabulary (the encoder guarantees injectivity).
         self._actions_by_asp_name = {asp_name(a.name): a for a in self.task.actions}
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
+        if heuristic is not None and heuristic not in HEURISTICS:
+            raise ValueError(f"heuristic must be None or one of {HEURISTICS}, not {heuristic!r}")
+        if heuristic is not None and self.family.name != 'seq':
+            raise ValueError(f"heuristic={heuristic!r} is available on the 'seq' encoding, not {self.family.name!r}.")
+        self.heuristic = heuristic
+        self.heuristic_depth = heuristic_depth
+        self._heuristic: Optional[GoalSupportHeuristic] = None
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
         # The horizon the last plan() call found its plan at; under PDR, the
@@ -248,12 +270,17 @@ class PLASPPlanner:
         ctl.add('base', [], self.task_facts)
         if self.step_rules:
             ctl.add('step', ['t'], self.step_rules)
+        self._heuristic = None
+        if self.heuristic is not None:
+            self._heuristic = GoalSupportHeuristic(max_level=self.heuristic_depth)
+            ctl.register_propagator(self._heuristic)
 
         if horizon is not None:
             parts = [('base', []), ('check', [clingo.Number(horizon)])]
             parts += [('step', [clingo.Number(t)]) for t in range(1, horizon + 1)]
             self._ground(ctl, parts)
             ctl.assign_external(clingo.Function('query', [clingo.Number(horizon)]), True)
+            self._set_horizon(horizon)
             outcome, symbols = self._solve(ctl, deadline)
             if outcome == 'unsat':
                 self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
@@ -264,6 +291,7 @@ class PLASPPlanner:
         self._ground(ctl, [('base', []), ('check', [clingo.Number(0)])])
         ctl.assign_external(clingo.Function('query', [clingo.Number(0)]), True)
         for t in range(0, max_horizon + 1):
+            self._set_horizon(t)
             outcome, symbols = self._solve(ctl, deadline)
             if outcome != 'unsat':
                 return self._conclude(outcome, symbols, t)
@@ -282,6 +310,12 @@ class PLASPPlanner:
     # ------------------------------------------------------------------
     # Solving
     # ------------------------------------------------------------------
+
+    def _set_horizon(self, t: int) -> None:
+        """Tell the decision heuristic, if any, which horizon's goal it works
+        back from."""
+        if self._heuristic is not None:
+            self._heuristic.horizon = t
 
     @staticmethod
     def _ground(ctl, parts) -> None:
@@ -340,6 +374,8 @@ class PLASPPlanner:
             return self._empty_plan()
         self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
         self.solved_horizon = horizon
+        if self._heuristic is not None:
+            self.logs.append(f'Plan found at horizon {horizon} ({self._heuristic.statistics()}).')
         return _plan
 
     # ------------------------------------------------------------------

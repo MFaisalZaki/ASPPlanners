@@ -90,6 +90,8 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `pdr_first` | PLASP | 0 | seconds of PDR on the task's boolean abstraction before deepening: a proof of unsolvability or a validated plan ends the search, see [PDR first](#pdr-first-on-the-boolean-abstraction); classical and numeric tasks |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
 | `encoding` | PLASP | `"seq"` | encoding family: `"seq"` or `"lifted"`, see [Encoding families](#encoding-families) |
+| `heuristic` | PLASP | off | `"goal-support"`: Rintanen's planning-specific branching rule as the solver's decision heuristic, see [Decision heuristic](#a-planning-decision-heuristic); `seq` only |
+| `heuristic_depth` | PLASP | 2 | how deep into the solver's decision levels that rule speaks; `None` for always |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
 | `timeout` | PLASP only | — | honored by `PLASPPlanner`; **`ABAPlanner` ignores it**, so bound its search with `max_horizon` |
 
@@ -292,6 +294,27 @@ PDR is **opt-in and classical-only**: `search="pdr"` on the `seq` or the `lifted
 What does work on numeric tasks is running PDR on their **boolean abstraction**: leave the numeric layer out, so numeric preconditions and goal conditions fall away, more actions apply and more states count as goals. That over-approximates reachability, so a proof of unsolvability found there holds for the real task, and a plan found there is a candidate the validator checks against the real task — real whenever the numbers were slack enough. `pdr_first=<seconds>` does exactly that before the deepening (`params={"pdr_first": 60}` through UP), on `seq` and on `lifted` (whose numeric step rules the abstraction leaves out with the layer): a proof or a validated plan ends the search, anything else hands over to the deepening unchanged. On a classical task the abstraction is the task itself, so this is simply PDR with a budget and deepening as the fallback. The one shape it skips is a boolean effect conditioned on a numeric comparison, which the abstraction would make fire always rather than maybe.
 
 On a 6-ball gripper with a fuel counter and fuel to spare, the abstract plan is valid and the task is solved in 3.3s where deepening needs 33s; with the fuel tight the abstract plan is rejected and the deepening does the work, so the cost is the budget. Feeding the learned cubes into the deepening as distance-to-goal constraints was also tried, and cost more per step than it saved on every instance, so it is not part of this. The benchmark configuration carries it as [plasp-seq-pdr-first.json](benchmarks/planners/plasp-seq-pdr-first.json) and [plasp-lifted-pdr-first.json](benchmarks/planners/plasp-lifted-pdr-first.json) on the classical and numeric tracks, and PDR alone as [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) and [plasp-lifted-pdr.json](benchmarks/planners/plasp-lifted-pdr.json) on the classical track.
+
+## A planning decision heuristic
+
+The solver does not expand states, so a planning heuristic cannot order an open list here; what it can do is choose the solver's next **decision**. clingo lets a propagator do that through its `decide` hook, and [aspplanners/plasp/heuristics.py](aspplanners/plasp/heuristics.py) uses it for the variable-selection rule of Rintanen, *Planning as satisfiability: Heuristics* (AIJ 2012), the ingredient behind Madagascar's planning-specific branching. It works backward from the goal through the current partial assignment: take a subgoal, find the earliest step from which its value could persist to where it is needed, and if no decided action already achieves it, decide true a free achieving action at that earliest step, next to the initial state, whose propagation refutes a wrong choice at once. It changes which model is found first, never which horizon is satisfiable, so plans stay as short as under the default.
+
+```python
+planner = PLASPPlanner(problem, heuristic="goal-support")   # or params={"heuristic": "goal-support"} through UP
+planner.plan(horizon=17)
+planner.logs[-1]   # 'Plan found at horizon 17 (goal-support heuristic: 161 of 52377 decisions)'
+```
+
+**Measured on `seq`, 6-ball gripper:**
+
+| setting | fixed horizon 17 (satisfiable) | fixed horizon 17, with a fuel counter | one-step deepening to 17 |
+|---|---|---|---|
+| default search | 7.5s | 10.2s | 37s |
+| heuristic, depth 2 | 2.9s | 2.7s | 63s |
+| heuristic, depth 3 | 4.2s | 4.2s | 110s |
+| heuristic, always | over 76s | — | timeout |
+
+Two lessons are in that table. A Python `decide` runs at every propagation fixpoint and bypasses the solver's activity-based learning while it speaks, so letting it speak only on the first two decision levels (`heuristic_depth=2`, the default) is what turns a loss into a threefold gain. And a branching rule helps *find* a model; it cannot help *refute* a horizon, which is where one-step deepening spends its time, so under the default deepening it costs more than it saves. It is therefore **off by default**, and meant for the settings where the horizon is satisfiable: a known or overshot horizon, or a scheduler that tries several at once. Achieving a subgoal at the latest step instead of the earliest was also measured and only ever did worse.
 
 ## Running the benchmarks
 
