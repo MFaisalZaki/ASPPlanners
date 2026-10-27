@@ -69,7 +69,7 @@ class PLASPPlanner:
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
         # The horizon the last plan() call found its plan at; under PDR, the
-        # target layer at which it was found (plans there may be longer).
+        # plan's length (plans there are not guaranteed shortest).
         self.solved_horizon: Optional[int] = None
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
@@ -189,8 +189,8 @@ class PLASPPlanner:
         `aspplanners.plasp.pdr` and ``encodings/seq/pdr.lp``), with
         `max_horizon` bounding the number of layers. PDR can prove a task
         unsolvable (`UNSOLVABLE_PROVEN`), which deepening cannot, and takes
-        no fixed `horizon`; it is available on the seq family for tasks
-        without numeric fluents or durative actions.
+        no fixed `horizon`; it is available on the seq family for every task
+        but a temporal one (a numeric task grounds a program per query).
 
         Deepening is multi-shot: one clingo Control instance grounds only the
         new step(t)/check(t) parts per horizon instead of regrounding the whole
@@ -317,9 +317,15 @@ class PLASPPlanner:
     def pdr_program(self) -> str:
         """The one-step program PDR queries: the task facts with the initial
         state renamed to pdrInitialState/2 (the state at 0 is the query's),
-        the family's layers, and pdr.lp."""
+        the family's layers, and pdr.lp. On a numeric task the dump is the
+        first query's program: the initial numeric values stated at time 0."""
         self._check_pdr()
         sections = [f"%% Task facts (initial state renamed for PDR)\n{self._pdr_facts()}"]
+        numeric = [line for line in sorted(self.compiled_task.fact_lines)
+                   if line.startswith('initialState(') and self._numeric_initial(line)]
+        if numeric:
+            sections.append("%% The first query's numeric state\n" + '\n'.join(
+                'holds(' + line[len('initialState('):] for line in numeric))
         for name, path in zip(self.layers, self.encoding_paths):
             with open(path, 'r') as f:
                 sections.append(f"%% Layer: {name}\n{f.read()}")
@@ -341,6 +347,12 @@ class PLASPPlanner:
         # ASP-rendered names: that is how the fact lines and the atoms spell them.
         return {asp_name(f.name) for f in self.task.fluents if f.name not in written}
 
+    def _numeric_initial(self, line: str) -> bool:
+        """Is this initialState/2 line a numeric fluent's? Its value term is a
+        number rather than true/false."""
+        value = line.rsplit(',', 1)[1].strip().rstrip(').')
+        return value.lstrip('-').isdigit()
+
     def _pdr_facts(self) -> str:
         static = self._pdr_static_fluents()
         prefix = 'initialState(variable(("'
@@ -359,21 +371,22 @@ class PLASPPlanner:
             raise ValueError(f"search='pdr' is available on the 'seq' encoding, not {self.family.name!r}.")
         if self.compiled_task.is_temporal or 'temporal' in self.layers:
             raise ValueError("search='pdr' is not available on a temporal task.")
-        if 'numeric' in self.layers:
-            raise ValueError(
-                "search='pdr' is not available on a numeric task: a query's state at time 0 "
-                "would need numeric values that are only known once the obligation arrives, "
-                "after the one-step program has been grounded.")
 
-    def _plan_pdr(self, max_layers, deadline):
-        self._check_pdr()
+    def _pdr_control(self) -> clingo.Control:
+        """A Control with the layers and pdr.lp loaded and the task facts
+        added, nothing grounded. PDR grounds it once for a propositional task
+        and once per query for a numeric one (see `aspplanners.plasp.pdr`)."""
         ctl = clingo.Control(arguments=['-n', '1'])
         for path in self.encoding_paths:
             ctl.load(path)
         ctl.load(self._pdr_path())
         ctl.add('base', [], self._pdr_facts())
+        return ctl
+
+    def _plan_pdr(self, max_layers, deadline):
+        self._check_pdr()
         try:
-            pdr = PDR(ctl, self._pdr_static_fluents())
+            pdr = PDR(self._pdr_control, self._pdr_static_fluents(), numeric='numeric' in self.layers)
             outcome = pdr.run(max_layers, deadline)
         except RuntimeError as error:
             refusal = refusal_from_clingo_error(error)

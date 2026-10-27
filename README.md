@@ -86,7 +86,7 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 |---|---|---|---|
 | `max_horizon` | both | 1000 | upper bound on the iterative-deepening search |
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
-| `search` | PLASP | `"deepening"` | `"pdr"`: property-directed reachability instead of horizon deepening, see [PDR](#property-directed-reachability); classical tasks on `seq`, `max_horizon` bounds its layers |
+| `search` | PLASP | `"deepening"` | `"pdr"`: property-directed reachability instead of horizon deepening, see [PDR](#property-directed-reachability); on `seq`, not for temporal tasks, `max_horizon` bounds its layers |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
 | `encoder_type` | PLASP | `"seq"` | encoding family |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
@@ -250,4 +250,6 @@ planner.logs[0]                             # 'PDR: plan (41 one-step queries, 9
 planner.pdr_program()                       # the one-step program, standalone
 ```
 
-Plans are not guaranteed shortest: a rescheduled obligation keeps the path it came with, so the plan found at target layer *k* can be longer than *k*. `max_horizon` bounds the number of layers. PDR is available on the `seq` encoding for tasks without numeric fluents or durative actions: a query's state at time 0 would need numeric values that are only known once an obligation arrives, after the one-step program has been grounded. The benchmark configuration carries it as [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) on the classical track.
+**Numeric tasks** take a second backend. The numeric layer grounds a fluent's values by reachability from the atoms at time 0, so a query's numeric state has to be there as facts before the step is grounded: on a numeric task PDR grounds a program *per query*, with the numeric values of the obligation's state as facts and the active cubes as plain constraints, while the booleans stay free and assumed, so boolean generalisation is unchanged and the reason's shrinking reuses the query's own program. The price is one grounding per obligation extension and per push, and that numeric values never leave a reason: a cube pins every numeric fluent to the exact value the state had, so PDR generalises over the booleans only and enumerates numeric states. It still proves unsolvability when the reachable numeric values are finite (a counter that only ticks below a bound), and cannot when they are not.
+
+Plans are not guaranteed shortest: a blocked obligation is re-tried one layer up with the path it came with (IC3's rescheduling, which is what makes PDR fast here — without it every layer has to refute every shorter length first, and the measured times go from seconds to timeouts), so the plan found at target layer *k* can be longer than *k*. An obligation is only re-tried while its path length plus its level stays within `max_horizon`, which bounds the length of any plan explored and keeps every layer finite even when numeric values never repeat. `max_horizon` also bounds the number of layers. PDR is available on the `seq` encoding for every task but a temporal one. The benchmark configuration carries it as [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) on the classical and numeric tracks.
