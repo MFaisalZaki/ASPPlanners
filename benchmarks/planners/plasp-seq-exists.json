@@ -1,0 +1,13 @@
+{
+    "planner-tag": "PLASPPlanner-seq-exists",
+    "up-planner-name": "PLASPPlanner",
+    "up-planner-module": "aspplanners",
+    "planner-params": {
+        "encoding": "seq",
+        "parallel": "exists",
+        "interference": "lazy",
+        "max_horizon": 1000,
+        "time_scale": 10
+    },
+    "tracks": ["classical", "numeric"]
+}

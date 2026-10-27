@@ -87,7 +87,9 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `max_horizon` | both | 1000 | upper bound on the iterative-deepening search |
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
-| `encoder_type` | PLASP | `"seq"` | encoding family |
+| `encoding` | PLASP | `"seq"` | encoding family |
+| `parallel` | PLASP | off | `"exists"` or `"forall"`: a set of actions per horizon step, mutexes generated on demand, see [Parallel steps](#parallel-steps-on-demand-mutexes); not for temporal tasks |
+| `interference` | PLASP | `"lazy"` | `"lazy"` judges whether two actions interfere the first time the solver puts them together, `"eager"` judges every pair up front |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
 | `timeout` | PLASP only | — | honored by `PLASPPlanner`; **`ABAPlanner` ignores it**, so bound its search with `max_horizon` |
 
@@ -230,3 +232,23 @@ planner.encoding_paths  # the .lp files that will be loaded, in load order
 ```
 
 The emitted facts are the authority — they describe the task *as encoded*, after the compilation pipeline, TIM inference, numeric rescaling and the durative split. `ProblemKind` is a second opinion only: it reports declared features rather than the vocabulary the encoding consumes, and the two need not agree (a durative action whose duration reads a fluent produces numeric facts on a problem whose kind has no numeric feature at all). Where they differ, the union wins — an unneeded layer grounds to nothing, while a missing one would be silently ignored.
+
+## Parallel steps: on-demand mutexes
+
+Under the default reading a horizon step holds **one** action, so the horizon the deepening search has to reach is the plan's length, and the unsatisfiable horizons on the way are paid for in full. `parallel="exists"` or `"forall"` lets a step hold a *set* of actions:
+
+* **forall-step** (Kautz & Selman 1996): no two actions of a step interfere, so the step can be executed in any order;
+* **exists-step** (Dimopoulos, Nebel & Koehler 1997; Rintanen, Heljanko & Niemelä 2006): the step can be executed in *some* order — the disabling graph induced by its actions is acyclic.
+
+Either needs interference constraints between actions, and encoding them up front is quadratic in the actions per step. Instead, following Abdelwahed, Bofill, Espasa & Villaret, *On-Demand Mutex Constraints for Numeric Planning as SMT* (ICAPS 2026), the encoding states no interference at all — `core.lp`'s step choice drops to `1 {occurs(A, t)}` — and a clingo **propagator** ([aspplanners/plasp/propagators.py](aspplanners/plasp/propagators.py)) watches the action atoms during search: when the solver makes an action true, the forall propagator raises a conflict against any active action of the same step it interferes with, and the exists propagator raises one when the new action closes a cycle in the step's disabling graph, the cycle being the conflict. Conflicts are handed to clingo as nogoods, so a mutex is paid for only once it has been hit and is forgotten once it stops being useful. Interference is computed on first contact and memoised (`interference="lazy"`); `"eager"` precomputes the whole graph for comparison.
+
+```python
+planner = PLASPPlanner(problem, parallel="exists")   # or params={"parallel": "exists"} through UP
+plan = planner.plan()
+planner.solved_horizon   # the number of parallel steps; len(plan.actions) is still the plan length
+planner.logs[-1]         # '... (exists-step, lazy interference: 379 mutex conflicts raised, 228 disabling edges among 1042 action pairs judged)'
+```
+
+What the propagator knows about an action is read off the ground facts in the solver — `precondition`, `postcondition`, the disjunctive layer's `orDisjunct`, the numeric layer's effects and comparisons — so no encoding layer changes. An action *reads* the variables of its preconditions, of its conditional effects' conditions and of every literal of its disjunctive conditions, and *writes* every effect, conditional or not; `a` disables `b` when it writes a variable `b` reads to another value than `b` reads, or when both write one variable to different values. Numeric fluents are value-less: a numeric write disables every reader and conflicts with every other writer (the numeric layer's unconditional effects do not sum). All of this is syntactic and over-approximates; the paper's *semantic* interference check, which would let two increases of one fluent commute, is the extension point (`InterferenceGraph.disables`). Each step of a model is serialised in a topological order of its disabling graph and the UP validator checks that order. Temporal tasks are refused: happenings are built on one snap action per step.
+
+On the bundled gripper the exists-step reading needs 2 steps for a 5-action plan where the sequential reading needs 5; on a 6-ball gripper, 6 steps and 0.13s against 17 steps and 32s. The benchmark configuration carries both readings as [plasp-seq-exists.json](benchmarks/planners/plasp-seq-exists.json) and [plasp-seq-forall.json](benchmarks/planners/plasp-seq-forall.json).
