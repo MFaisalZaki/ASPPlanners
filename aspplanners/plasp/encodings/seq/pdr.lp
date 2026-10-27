@@ -59,10 +59,12 @@
 %     query(1).
 %
 % Scope. Boolean / multi-valued STRIPS with conditional effects and the
-% disjunctive layer. Numeric fluents are out: a state at time 0 would need
-% its numeric values as atoms the step rules can see, and those values are
-% only known once the obligation arrives, after step(1) has been grounded.
-% Temporal tasks are out with them. Both are refused at construction.
+% disjunctive layer -- classical planning. Numeric fluents are out, and not
+% only because a state at time 0 would need its values as atoms before
+% step(1) is grounded: that was tried, with a program grounded per query,
+% and it works but a reason can never generalise over a numeric value, so
+% the layers grow with every value seen and it loses to deepening by two
+% orders of magnitude. Temporal tasks are out with them. Both are refused.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % Pin the current program part; see the note in core.lp.

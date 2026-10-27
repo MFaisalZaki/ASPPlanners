@@ -1,16 +1,14 @@
 """Tests for property-directed reachability (aspplanners.plasp.pdr and
 encodings/seq/pdr.lp), the planner's ``search='pdr'`` mode.
 
-PDR answers one-step queries against a ground program whose boolean state at
-time 0 is fixed by assumptions -- one program for all queries on a
-propositional task, one per query on a numeric one, with the numeric values as
-facts -- learns blocked cubes from unsatisfiable cores, and proves
-unsolvability when a layer stops growing. Pinned here: (1) valid plans on the
-classical and numeric fixtures and bundled domains; (2) the two things
-deepening cannot do -- a proof of unsolvability, and a goal already true read
-off the first query; (3) the query mechanics: a reason is a subset of the
-state, never empty on a solvable task, numeric values ride along in cubes,
-and the noop never reaches a plan; (4) the refusals and the option surface.
+PDR answers one-step queries against a single ground program whose state at
+time 0 is fixed by assumptions, learns blocked cubes from unsatisfiable cores,
+and proves unsolvability when a layer stops growing. Classical tasks only.
+Pinned here: (1) valid plans on the classical fixtures and bundled domains;
+(2) the two things deepening cannot do -- a proof of unsolvability, and a goal
+already true read off the first query; (3) the query mechanics: a reason is a
+subset of the state, never empty on a solvable task, and the noop never
+reaches a plan; (4) the refusals and the option surface.
 """
 
 import os
@@ -23,12 +21,12 @@ from unified_planning.shortcuts import OneshotPlanner
 from unified_planning.engines import PlanGenerationResultStatus
 
 import aspplanners  # noqa: F401
-from aspplanners.plasp.pdr import NOOP, PDR, FreshBackend, IncrementalBackend
+from aspplanners.plasp.pdr import NOOP, PDR
 from aspplanners.plasp.planner import PLASPPlanner
 
 from test_planner import (
     disjunction_problem, forall_problem, negative_precondition_problem,
-    numeric_counter_problem, robot_line_problem, rover_recharge_problem,
+    numeric_counter_problem, robot_line_problem,
 )
 
 PDDL_DIR = os.path.join(os.path.dirname(__file__), "pddl")
@@ -47,7 +45,7 @@ def pdr_plan(problem, **kwargs):
 
 def pdr_instance(problem):
     planner = PLASPPlanner(problem)
-    return PDR(planner._pdr_control, planner._pdr_static_fluents(), numeric="numeric" in planner.layers)
+    return PDR(planner._pdr_control(), planner._pdr_static_fluents())
 
 
 # ---------------------------------------------------------------------------
@@ -68,20 +66,8 @@ def test_fixtures_are_solved_with_validated_plans(make_problem):
     assert "PDR: plan" in planner.logs[0]
 
 
-@pytest.mark.parametrize("make_problem", [
-    lambda: numeric_counter_problem(3),
-    lambda: numeric_counter_problem(12),
-    rover_recharge_problem,
-])
-def test_numeric_fixtures_are_solved_with_validated_plans(make_problem):
-    planner, plan = pdr_plan(make_problem())
-    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING, planner.logs
-    assert len(plan.actions) >= 1 and "groundings" in planner.logs[0]
-
-
-@pytest.mark.parametrize("domain", ["alarm", "blocksworld", "gripper", "lift", "transport",
-                                    "rover", "zenoflight", "tradepost", "briefcase"])
-def test_bundled_classical_and_numeric_domains_are_solved(domain):
+@pytest.mark.parametrize("domain", ["alarm", "blocksworld", "gripper", "lift", "transport"])
+def test_bundled_classical_domains_are_solved(domain):
     for problem in sorted(f for f in os.listdir(os.path.join(PDDL_DIR, domain)) if f.startswith("problem")):
         planner, plan = pdr_plan(pddl(domain, problem))
         assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING, (domain, problem, planner.logs)
@@ -113,39 +99,6 @@ def test_an_unsolvable_task_is_proven_unsolvable():
     assert deepening.status == PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
 
 
-def unsolvable_counter(bound=None, step=1, target=5):
-    """`tick` adds `step` to a counter (only below `bound`, when given); the
-    goal wants the counter equal to `target`."""
-    from unified_planning.shortcuts import Equals, Fluent, InstantaneousAction, IntType, LT, Problem
-    counter = Fluent("counter", IntType())
-    tick = InstantaneousAction("tick")
-    if bound is not None:
-        tick.add_precondition(LT(counter(), bound))
-    tick.add_increase_effect(counter(), step)
-    problem = Problem("unsolvable_counter")
-    problem.add_fluent(counter, default_initial_value=0)
-    problem.add_action(tick)
-    problem.add_goal(Equals(counter(), target))
-    return problem
-
-
-def test_a_bounded_numeric_task_is_proven_unsolvable():
-    """`tick` only below 4, goal needs exactly 5: the reachable values are
-    finite, so the layers close and the numeric backend proves it."""
-    planner, plan = pdr_plan(unsolvable_counter(bound=4, target=5))
-    assert planner.status == PlanGenerationResultStatus.UNSOLVABLE_PROVEN, planner.logs
-
-
-def test_an_unbounded_numeric_task_cannot_be_proven_unsolvable():
-    """Ticking by 2 never hits 5, but every layer sees a new value, so the
-    layers never close: PDR runs out of layers, which is the honest answer --
-    and each layer terminates, because an obligation is rescheduled only
-    while its path length plus its level stays within the layer bound."""
-    planner, plan = pdr_plan(unsolvable_counter(step=2, target=5), max_horizon=6)
-    assert planner.status == PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY, planner.logs
-    assert "within 6 layers" in planner.logs[-1]
-
-
 def test_a_goal_that_already_holds_is_the_empty_plan():
     problem = robot_line_problem()
     problem.clear_goals()
@@ -167,10 +120,19 @@ def test_the_layer_bound_is_respected():
 
 def test_the_initial_state_and_variables_are_read_off_the_program():
     pdr = pdr_instance(pddl("gripper"))
-    assert isinstance(pdr.backend, IncrementalBackend)
-    assert len(pdr.backend.variables) == 12   # 4 at + 2 at_robby + 2 free + 4 carry
-    assert len(pdr.initial.bools) == 5        # 2 at, at_robby(a), 2 free
-    assert pdr.initial.nums == frozenset()
+    assert len(pdr.variables) == 12          # 4 at + 2 at_robby + 2 free + 4 carry
+    assert len(pdr.initial) == 5             # 2 at, at_robby(a), 2 free
+    assert all(v in set(pdr.variables) for v in pdr.initial)
+
+
+def test_static_fluents_are_pinned_and_never_in_a_reason():
+    """transport's `link` is static: the encoder folds it into the action
+    signatures, so its initial facts keep their name and PDR pins it."""
+    pdr = pdr_instance(pddl("transport"))
+    assert pdr.static and all('"link"' in str(v) for v in pdr.static)
+    assert not any(v in pdr.static for v in pdr.free)
+    unsat = pdr.extend(pdr.initial, 1)
+    assert unsat[0] == "unsat" and not any(v in pdr.static for v, _ in unsat[1])
 
 
 def test_a_reason_is_a_proper_subset_of_the_state_and_a_sat_query_yields_a_successor():
@@ -178,8 +140,8 @@ def test_a_reason_is_a_proper_subset_of_the_state_and_a_sat_query_yields_a_succe
     unsat = pdr.extend(pdr.initial, 1)       # no single action reaches the goal
     assert unsat[0] == "unsat"
     cube = unsat[1]
-    assert 0 < len(cube) < len(pdr.backend.variables)
-    assert cube.covers(pdr.initial)
+    assert 0 < len(cube) < len(pdr.variables)
+    assert all((v in pdr.initial) == positive for v, positive in cube)
     pdr._add_cube(cube, 1)
     sat = pdr.extend(pdr.initial, 2)         # some action leads outside the cube
     assert sat[0] == "sat" and sat[1] != NOOP
@@ -187,36 +149,18 @@ def test_a_reason_is_a_proper_subset_of_the_state_and_a_sat_query_yields_a_succe
 
 
 def test_the_noop_lets_a_goal_state_pass_a_level_one_query():
-    from aspplanners.plasp.pdr import State
     pdr = pdr_instance(pddl("gripper"))
-    variables = pdr.backend.variables
-    goal_bools = {v for v in variables if '"at"' in str(v) and 'room_b' in str(v)}
-    goal_bools |= {v for v in pdr.initial.bools if '"at"' not in str(v)}
-    result = pdr.extend(State(frozenset(goal_bools)), 1)
+    goal_state = frozenset(v for v in pdr.variables if '"at"' in str(v) and 'room_b' in str(v))
+    result = pdr.extend(goal_state | frozenset(v for v in pdr.initial if '"at"' not in str(v)), 1)
     assert result[0] == "sat" and result[1] == NOOP
-
-
-def test_a_numeric_task_grounds_per_query_and_its_cubes_carry_the_numeric_values():
-    pdr = pdr_instance(numeric_counter_problem(3))
-    assert isinstance(pdr.backend, FreshBackend)
-    assert len(pdr.initial.nums) == 1        # counter = 0
-    unsat = pdr.extend(pdr.initial, 1)       # one tick does not reach 3
-    assert unsat[0] == "unsat"
-    assert unsat[1].nums == pdr.initial.nums  # the value rides along, never generalised
-    before = pdr.backend.groundings
-    pdr._add_cube(unsat[1], 1)
-    sat = pdr.extend(pdr.initial, 2)
-    assert sat[0] == "sat"
-    assert sat[2].nums != pdr.initial.nums   # tick moved the counter
-    assert pdr.backend.groundings == before + 1
 
 
 def test_the_pdr_program_renames_the_initial_state_and_is_standalone(tmp_path):
     planner = PLASPPlanner(pddl("gripper"))
     text = planner.pdr_program()
     assert "pdrInitialState(" in text and "\ninitialState(" not in text
-    numeric = PLASPPlanner(numeric_counter_problem()).pdr_program()
-    assert "The first query's numeric state" in numeric and "holds(variable" in numeric
+    transport = PLASPPlanner(pddl("transport")).pdr_program()
+    assert '\ninitialState(variable(("link"' in transport     # statics keep their facts
     path = tmp_path / "pdr.lp"
     path.write_text(text)
     ctl = clingo.Control(["-n", "1"])
@@ -236,9 +180,14 @@ def test_through_the_up_engine():
     assert len(result.plan.actions) >= 5    # validated; not promised shortest
 
 
-def test_temporal_tasks_are_refused():
-    with pytest.raises(ValueError, match="temporal task"):
-        PLASPPlanner(pddl("matchcellar")).plan(search="pdr")
+@pytest.mark.parametrize("make_problem, reason", [
+    (numeric_counter_problem, "classical tasks only"),
+    (lambda: pddl("rover"), "classical tasks only"),
+    (lambda: pddl("matchcellar"), "temporal task"),
+])
+def test_numeric_and_temporal_tasks_are_refused(make_problem, reason):
+    with pytest.raises(ValueError, match=reason):
+        PLASPPlanner(make_problem()).plan(search="pdr")
 
 
 def test_bad_options_are_rejected():
