@@ -62,9 +62,6 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
       - ``compilationlist`` (list of ``[engine_name, CompilationKind]`` pairs;
         takes over the automatic selection, see
         :meth:`PLASPPlanner._check_compilationlist`)
-      - ``interference`` (``"lazy"`` default, or ``"eager"``) -- under the
-        parallel encodings, when the propagator judges whether two actions
-        interfere
     """
 
     def __init__(self, **options):
@@ -176,11 +173,10 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         max_horizon = self.conf.get('max_horizon', 1000)
         time_scale = int(self.conf.get('time_scale', DEFAULT_TIME_SCALE))
         compilationlist = self.conf.get('compilationlist')
-        interference = self.conf.get('interference', 'lazy')
 
         try:
             planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
-                                   time_scale=time_scale, interference=interference)
+                                   time_scale=time_scale)
             plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout)
         except NotImplementedError as refusal:
             return _unsupported_result(self.name, refusal)

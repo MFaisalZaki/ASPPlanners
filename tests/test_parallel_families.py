@@ -206,13 +206,6 @@ def test_every_bundled_classical_and_numeric_domain_solves_in_parallel(domain):
         assert exists.solved_horizon <= forall.solved_horizon <= sequential.solved_horizon, (domain, problem)
 
 
-def test_eager_and_lazy_interference_agree():
-    for domain in ("gripper", "lift", "rover"):
-        lazy, _ = solve(pddl(domain), "exists", interference="lazy")
-        eager, _ = solve(pddl(domain), "exists", interference="eager")
-        assert lazy.solved_horizon == eager.solved_horizon, domain
-
-
 def two_ticks_problem():
     """`tick_a` and `tick_b` each increment `counter`; `finish` needs it >= 2."""
     counter = Fluent("counter", IntType())
@@ -250,14 +243,14 @@ def test_through_the_up_engine():
 # The read/write analysis
 # ---------------------------------------------------------------------------
 
-def _graph(problem, interference="lazy"):
+def _graph(problem):
     planner = PLASPPlanner(problem)
     ctl = clingo.Control()
     for path in planner.encoding_paths:
         ctl.load(path)
     ctl.add("base", [], planner.task_facts)
     ctl.ground([("base", [])])
-    return InterferenceGraph(ctl.symbolic_atoms, interference)
+    return InterferenceGraph(ctl.symbolic_atoms)
 
 
 def _action(graph, name):
@@ -286,10 +279,12 @@ def test_numeric_fluents_are_value_less_reads_and_writes():
     assert graph.disables(tick_a, tick_b) and graph.disables(tick_b, tick_a)
 
 
-def test_eager_interference_judges_every_pair_up_front():
-    lazy, eager = _graph(pddl("gripper")), _graph(pddl("gripper"), "eager")
-    n = len(set(eager.reads) | set(eager.writes))
-    assert (lazy.edges_computed, eager.edges_computed) == (0, n * (n - 1))
+def test_interference_is_judged_on_demand_and_memoised():
+    graph = _graph(pddl("gripper"))
+    assert graph.edges_computed == 0
+    a, b = list(graph.writes)[:2]
+    graph.disables(a, b); graph.disables(a, b)
+    assert graph.edges_computed == 1
 
 
 def test_serialise_orders_a_step_topologically_and_rejects_a_cycle():
@@ -308,8 +303,6 @@ def test_serialise_orders_a_step_topologically_and_rejects_a_cycle():
 def test_bad_options_are_rejected():
     with pytest.raises(ValueError, match="Unsupported encoding family"):
         PLASPPlanner(robot_line_problem(), "sometimes")
-    with pytest.raises(ValueError, match="interference must be"):
-        PLASPPlanner(robot_line_problem(), "exists", interference="psychic")
     with pytest.raises(ValueError, match="semantics must be"):
         ParallelStepPropagator("maybe")
 

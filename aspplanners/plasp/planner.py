@@ -12,7 +12,7 @@ from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
-from aspplanners.plasp.propagators import INTERFERENCE, ParallelStepPropagator
+from aspplanners.plasp.propagators import ParallelStepPropagator
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
@@ -43,11 +43,8 @@ class PLASPPlanner:
     exists-step: some order works -- and leave what makes a set legal to a
     propagator that generates the interference constraints on demand during
     search (`aspplanners.plasp.propagators`, after Abdelwahed, Bofill, Espasa
-    & Villaret, ICAPS 2026). For those, `interference` is ``'lazy'`` (judge a
-    pair of actions the first time the solver puts them together) or
-    ``'eager'`` (judge every pair up front; the mutexes are still added on
-    demand). Neither takes a temporal task: happenings are built on one snap
-    action per step. The horizon a plan was found at is in
+    & Villaret, ICAPS 2026). Neither takes a temporal task: happenings are
+    built on one snap action per step. The horizon a plan was found at is in
     `self.solved_horizon`: its length under seq, its number of parallel
     steps otherwise.
 
@@ -56,7 +53,7 @@ class PLASPPlanner:
     """
 
     def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None,
-                 time_scale: int = DEFAULT_TIME_SCALE, interference: str = 'lazy'):
+                 time_scale: int = DEFAULT_TIME_SCALE):
         family_name, explicit_layers = parse_selection(encoder_type)
         if family_name not in ENCODERS:
             raise ValueError(
@@ -85,9 +82,6 @@ class PLASPPlanner:
         # The step semantics the family leaves to a propagator ('forall',
         # 'exists'), or None when its encoding is complete on its own (seq).
         self.parallel = self.family.propagator
-        if interference not in INTERFERENCE:
-            raise ValueError(f"interference must be one of {INTERFERENCE}, not {interference!r}")
-        self.interference = interference
         self._propagator: Optional[ParallelStepPropagator] = None
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
@@ -213,7 +207,7 @@ class PLASPPlanner:
         ctl.add('base', [], self.task_facts)
         self._propagator = None
         if self.parallel:
-            self._propagator = ParallelStepPropagator(self.parallel, self.interference)
+            self._propagator = ParallelStepPropagator(self.parallel)
             ctl.register_propagator(self._propagator)
         return ctl
 

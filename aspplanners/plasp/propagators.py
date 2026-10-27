@@ -31,10 +31,9 @@ It is learned like any other clause, so a mutex is paid for only once it has
 been hit, and is deletable, so it is forgotten when it stops being useful --
 the two properties the paper identifies as the source of its scalability.
 Interference itself is computed on demand too, the first time two actions are
-considered together, and memoised (the paper's *lazy* interference); `eager`
-precomputes the whole disabling graph at the first `init` instead, for
-comparison, which is the paper's eager baseline with the mutexes still added
-lazily.
+considered together, and memoised (the paper's *lazy* interference): the
+disabling graph is never built in full, only the pairs the search actually
+puts together are ever judged.
 
 
 What the propagator knows about an action is read off the ground task facts in
@@ -83,7 +82,6 @@ import clingo
 ANY = object()
 
 SEMANTICS = ('exists', 'forall')
-INTERFERENCE = ('lazy', 'eager')
 
 
 class InterferenceGraph:
@@ -96,23 +94,14 @@ class InterferenceGraph:
     `occurs/2`.
     """
 
-    def __init__(self, symbolic_atoms, interference: str = 'lazy'):
-        if interference not in INTERFERENCE:
-            raise ValueError(f"interference must be one of {INTERFERENCE}, not {interference!r}")
-        self.interference = interference
+    def __init__(self, symbolic_atoms):
         # action -> variable -> set of values (ANY for a numeric fluent)
         self.reads: Dict[clingo.Symbol, Dict[clingo.Symbol, Set]] = {}
         self.writes: Dict[clingo.Symbol, Dict[clingo.Symbol, Set]] = {}
         self._memo: Dict[Tuple[clingo.Symbol, clingo.Symbol], bool] = {}
-        self.edges_computed = 0   # pairs judged (lazily or eagerly)
+        self.edges_computed = 0   # pairs judged so far
         self.edges = 0            # of which are disabling edges
         self._load(symbolic_atoms)
-        if interference == 'eager':
-            actions = list(set(self.reads) | set(self.writes))
-            for a in actions:
-                for b in actions:
-                    if a is not b:
-                        self.disables(a, b)
 
     # ------------------------------------------------------------------
     # Loading the read/write sets from the ground facts
@@ -258,11 +247,10 @@ class ParallelStepPropagator:
     atoms as they are grounded. State is kept per solver thread.
     """
 
-    def __init__(self, semantics: str = 'exists', interference: str = 'lazy'):
+    def __init__(self, semantics: str = 'exists'):
         if semantics not in SEMANTICS:
             raise ValueError(f"semantics must be one of {SEMANTICS}, not {semantics!r}")
         self.semantics = semantics
-        self.interference = interference
         self.graph: Optional[InterferenceGraph] = None
         # solver literal -> the (action, step) atoms it stands for (normally one;
         # two occurs atoms can share a literal once the solver has equated them)
@@ -275,7 +263,7 @@ class ParallelStepPropagator:
 
     def init(self, init) -> None:
         if self.graph is None:
-            self.graph = InterferenceGraph(init.symbolic_atoms, self.interference)
+            self.graph = InterferenceGraph(init.symbolic_atoms)
         for atom in init.symbolic_atoms.by_signature('occurs', 2):
             literal = init.solver_literal(atom.literal)
             key = (atom.symbol.arguments[0], atom.symbol.arguments[1].number)
@@ -357,7 +345,6 @@ class ParallelStepPropagator:
 
     def statistics(self) -> str:
         graph = self.graph
-        return (f"{self.semantics}-step, {self.interference} interference: "
-                f"{self.conflicts} mutex conflicts raised, "
+        return (f"{self.semantics}-step: {self.conflicts} mutex conflicts raised, "
                 f"{graph.edges} disabling edges among {graph.edges_computed} action pairs judged"
                 if graph else f"{self.semantics}-step: not initialised")
