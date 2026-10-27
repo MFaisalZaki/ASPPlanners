@@ -36,7 +36,10 @@ class PLASPPlanner:
 
     `parallel` switches the horizon from one action per step to a set of
     actions per step: ``'exists'`` (exists-step: the step can be executed in
-    some order) or ``'forall'`` (forall-step: in any order). The interference
+    some order) or ``'forall'`` (forall-step: in any order); ``'sequential'``
+    keeps one action per step but has the propagator enforce the cap instead
+    of core's cardinality constraint, to measure the one against the other
+    (same plans, same horizons as the default). The interference
     constraints that make a set legal are not in the encoding; a propagator
     generates them on demand during search (`aspplanners.plasp.propagators`,
     after Abdelwahed, Bofill, Espasa & Villaret, ICAPS 2026). `interference`
@@ -375,7 +378,7 @@ class PLASPPlanner:
         ordered = []
         for step in sorted(by_step):
             actions = by_step[step]
-            if self._propagator is not None and len(actions) > 1:
+            if self._propagator is not None:
                 actions = self._propagator.serialise(actions)
             ordered.extend(actions)
         steps = [self._construct_action(self._action_tuple(clingo.Function('occurs', [a, clingo.Number(0)])))

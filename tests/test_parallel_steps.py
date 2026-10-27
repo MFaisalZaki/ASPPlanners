@@ -276,3 +276,15 @@ def test_the_sequential_reading_still_puts_one_action_per_step(make_problem):
     planner, plan = solve(make_problem())
     assert planner.parallel is None
     assert planner.solved_horizon == len(plan.actions)
+
+
+@pytest.mark.parametrize("domain", ["gripper", "lift", "blocksworld", "rover", "zenoflight"])
+def test_the_propagator_enforced_sequential_cap_admits_the_same_horizons(domain):
+    """`parallel='sequential'` drops core's cap and has the propagator reject any
+    two actions in one step: same semantics as the default, so the same
+    horizon, one action per step, and a validated plan."""
+    encoded, _ = solve(pddl(domain))
+    lazy, plan = solve(pddl(domain), parallel="sequential")
+    assert lazy.solved_horizon == encoded.solved_horizon == len(plan.actions)
+    assert "cap enforced by the propagator" in lazy.logs[-1]
+    assert lazy._propagator.graph is None   # no interference to judge

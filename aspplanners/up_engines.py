@@ -61,7 +61,8 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
       - ``parallel`` (``"exists"`` or ``"forall"``; default off) -- a set of
         actions per horizon step, with the interference constraints generated
         on demand by a propagator (see :mod:`aspplanners.plasp.propagators`);
-        not available on temporal tasks
+        ``"sequential"`` keeps one action per step with the cap enforced by
+        the propagator instead of the encoding; not available on temporal tasks
       - ``interference`` (``"lazy"`` default, or ``"eager"``) -- when the
         propagator judges whether two actions interfere
     """

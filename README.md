@@ -88,7 +88,7 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
 | `encoding` | PLASP | `"seq"` | encoding family |
-| `parallel` | PLASP | off | `"exists"` or `"forall"`: a set of actions per horizon step, mutexes generated on demand, see [Parallel steps](#parallel-steps-on-demand-mutexes); not for temporal tasks |
+| `parallel` | PLASP | off | `"exists"` or `"forall"`: a set of actions per horizon step, mutexes generated on demand, see [Parallel steps](#parallel-steps-on-demand-mutexes); `"sequential"`: one action per step with the cap enforced by the propagator instead of the encoding; not for temporal tasks |
 | `interference` | PLASP | `"lazy"` | `"lazy"` judges whether two actions interfere the first time the solver puts them together, `"eager"` judges every pair up front |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
 | `timeout` | PLASP only | — | honored by `PLASPPlanner`; **`ABAPlanner` ignores it**, so bound its search with `max_horizon` |
@@ -250,5 +250,7 @@ planner.logs[-1]         # '... (exists-step, lazy interference: 379 mutex confl
 ```
 
 What the propagator knows about an action is read off the ground facts in the solver — `precondition`, `postcondition`, the disjunctive layer's `orDisjunct`, the numeric layer's effects and comparisons — so no encoding layer changes. An action *reads* the variables of its preconditions, of its conditional effects' conditions and of every literal of its disjunctive conditions, and *writes* every effect, conditional or not; `a` disables `b` when it writes a variable `b` reads to another value than `b` reads, or when both write one variable to different values. Numeric fluents are value-less: a numeric write disables every reader and conflicts with every other writer (the numeric layer's unconditional effects do not sum). All of this is syntactic and over-approximates; the paper's *semantic* interference check, which would let two increases of one fluent commute, is the extension point (`InterferenceGraph.disables`). Each step of a model is serialised in a topological order of its disabling graph and the UP validator checks that order. Temporal tasks are refused: happenings are built on one snap action per step.
+
+`parallel="sequential"` completes the matrix: the same one-action-per-step reading as the default, but with core's cardinality constraint dropped and the propagator rejecting any two actions in one step. It admits exactly the same plans and exists to measure the propagator's overhead against clasp's native cardinality constraint.
 
 On the bundled gripper the exists-step reading needs 2 steps for a 5-action plan where the sequential reading needs 5; on a 6-ball gripper, 6 steps and 0.13s against 17 steps and 32s. The benchmark configuration carries both readings as [plasp-seq-exists.json](benchmarks/planners/plasp-seq-exists.json) and [plasp-seq-forall.json](benchmarks/planners/plasp-seq-forall.json).
