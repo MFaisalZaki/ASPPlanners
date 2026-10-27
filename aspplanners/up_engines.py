@@ -62,6 +62,10 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         reachability, see :mod:`aspplanners.plasp.pdr`; classical tasks on
         the seq encoding, ``max_horizon`` bounds its layers, and it can
         report ``UNSOLVABLE_PROVEN``)
+      - ``pdr_first`` (seconds, default 0) -- run PDR on the boolean
+        abstraction of the task for at most that long before deepening; a
+        proof of unsolvability or a validated plan ends the search, else the
+        deepening runs as usual. Classical and numeric tasks.
     """
 
     def __init__(self, **options):
@@ -174,12 +178,13 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         time_scale = int(self.conf.get('time_scale', DEFAULT_TIME_SCALE))
         compilationlist = self.conf.get('compilationlist')
         search = self.conf.get('search', 'deepening')
+        pdr_first = float(self.conf.get('pdr_first', 0))
 
         try:
             planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
                                    time_scale=time_scale)
             plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout,
-                                search=search)
+                                search=search, pdr_first=pdr_first)
         except NotImplementedError as refusal:
             return _unsupported_result(self.name, refusal)
         status = planner.status

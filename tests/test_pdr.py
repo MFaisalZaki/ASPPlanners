@@ -203,3 +203,99 @@ def test_deepening_is_unchanged():
     assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING
     assert planner.solved_horizon == len(plan.actions) == 5
     assert not planner.logs
+
+
+# ---------------------------------------------------------------------------
+# pdr_first: PDR on the boolean abstraction before deepening
+# ---------------------------------------------------------------------------
+
+def fuel_gripper(balls, fuel):
+    """Gripper with an `energy` counter every move consumes; `fuel` of it."""
+    from unified_planning.shortcuts import (
+        BoolType, Fluent, GE, InstantaneousAction, IntType, Object, Problem, UserType)
+    Room, Ball, Gripper = UserType("room"), UserType("ball"), UserType("gripper")
+    at_robby, at = Fluent("at_robby", BoolType(), r=Room), Fluent("at", BoolType(), b=Ball, r=Room)
+    free, carry = Fluent("free", BoolType(), g=Gripper), Fluent("carry", BoolType(), b=Ball, g=Gripper)
+    energy = Fluent("energy", IntType())
+    move = InstantaneousAction("move", f=Room, t=Room)
+    f, t = move.parameters
+    move.add_precondition(at_robby(f)); move.add_precondition(GE(energy(), 1))
+    move.add_effect(at_robby(f), False); move.add_effect(at_robby(t), True); move.add_decrease_effect(energy(), 1)
+    pick = InstantaneousAction("pick", b=Ball, r=Room, g=Gripper)
+    b, r, g = pick.parameters
+    for pre in (at(b, r), at_robby(r), free(g)):
+        pick.add_precondition(pre)
+    pick.add_effect(carry(b, g), True); pick.add_effect(at(b, r), False); pick.add_effect(free(g), False)
+    drop = InstantaneousAction("drop", b=Ball, r=Room, g=Gripper)
+    b, r, g = drop.parameters
+    for pre in (carry(b, g), at_robby(r)):
+        drop.add_precondition(pre)
+    drop.add_effect(at(b, r), True); drop.add_effect(carry(b, g), False); drop.add_effect(free(g), True)
+    problem = Problem("fuel_gripper")
+    for fl in (at_robby, at, free, carry):
+        problem.add_fluent(fl, default_initial_value=False)
+    problem.add_fluent(energy, default_initial_value=fuel)
+    rooms = [Object("a", Room), Object("b", Room)]
+    ball_objs = [Object(f"ball{i}", Ball) for i in range(balls)]
+    grippers = [Object("left", Gripper), Object("right", Gripper)]
+    problem.add_objects(rooms + ball_objs + grippers)
+    problem.add_actions([move, pick, drop])
+    problem.set_initial_value(at_robby(rooms[0]), True)
+    for ball in ball_objs:
+        problem.set_initial_value(at(ball, rooms[0]), True)
+        problem.add_goal(at(ball, rooms[1]))
+    for gr in grippers:
+        problem.set_initial_value(free(gr), True)
+    return problem
+
+
+def test_pdr_first_returns_pdrs_plan_on_a_classical_task():
+    planner = PLASPPlanner(pddl("gripper"))
+    plan = planner.plan(pdr_first=30)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+    assert "PDR found a plan" in planner.logs[0] and len(plan.actions) >= 5
+
+
+def test_pdr_first_takes_a_valid_abstract_plan_on_a_numeric_task_with_slack():
+    planner = PLASPPlanner(fuel_gripper(2, 20))
+    plan = planner.plan(pdr_first=30)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+    assert "on the boolean abstraction, valid for the task" in planner.logs[0]
+    assert len(plan.actions) >= 5
+
+
+def test_pdr_first_falls_back_to_deepening_when_the_abstract_plan_is_not_real():
+    """Fuel for exactly one move: the abstraction's plan, unaware of fuel, is
+    rejected by the validator and the deepening finds the real one."""
+    planner = PLASPPlanner(fuel_gripper(2, 1))
+    plan = planner.plan(pdr_first=30)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+    assert "not valid for the task" in planner.logs[0]
+    assert len(plan.actions) == 5 == planner.solved_horizon   # pick, pick, move, drop, drop
+
+
+def test_pdr_first_carries_an_abstract_proof_of_unsolvability_over():
+    """The boolean abstraction of an unsolvable robot line with a numeric
+    fluent added is still unsolvable, and that proof holds for the task."""
+    from unified_planning.shortcuts import Fluent, IntType
+    problem = robot_line_problem(connected_line=False)
+    problem.add_fluent(Fluent("odometer", IntType()), default_initial_value=0)
+    problem.action("move").add_increase_effect(problem.fluent("odometer")(), 1)
+    planner = PLASPPlanner(problem)
+    assert "numeric" in planner.layers
+    planner.plan(pdr_first=30)
+    assert planner.status == PlanGenerationResultStatus.UNSOLVABLE_PROVEN
+    assert "proved the task unsolvable" in planner.logs[0]
+
+
+def test_pdr_first_is_skipped_on_a_temporal_task_and_the_deepening_still_runs():
+    planner = PLASPPlanner(pddl("matchcellar"))
+    planner.plan(pdr_first=5)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING
+    assert "pdr_first skipped" in planner.logs[0]
+
+
+def test_pdr_first_through_the_up_engine():
+    with OneshotPlanner(name="PLASPPlanner", params={"pdr_first": 30}) as planner:
+        result = planner.solve(fuel_gripper(2, 20))
+    assert result.status == PlanGenerationResultStatus.SOLVED_SATISFICING

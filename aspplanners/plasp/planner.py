@@ -182,7 +182,8 @@ class PLASPPlanner:
         """The "no plan" value, of whichever plan class this task produces."""
         return TimeTriggeredPlan([]) if self.compiled_task.is_temporal else SequentialPlan([])
 
-    def plan(self, horizon=None, max_horizon=1000, timeout=None, search='deepening'):
+    def plan(self, horizon=None, max_horizon=1000, timeout=None, search='deepening',
+             pdr_first: float = 0):
         """Iterative-deepening search over horizons 0..max_horizon, or a single
         solve at `horizon` when given, or -- with ``search='pdr'`` --
         property-directed reachability over the one-step program (see
@@ -191,6 +192,15 @@ class PLASPPlanner:
         unsolvable (`UNSOLVABLE_PROVEN`), which deepening cannot, and takes
         no fixed `horizon`; it is available on the seq family for classical
         tasks (no numeric fluents, no durative actions).
+
+        `pdr_first`, in seconds, runs PDR first on the BOOLEAN ABSTRACTION of
+        the task (numeric layer left out) for at most that long, before the
+        deepening. An abstract proof of unsolvability settles the task (it
+        carries over); an abstract plan is validated against the real task
+        and returned when it is a real one, which on a numeric task is the
+        case whenever the numbers were slack; otherwise the deepening runs
+        as usual. Skipped, with a log line, on a temporal task and on the
+        one shape that does not abstract soundly (see `_pdr_first`).
 
         Deepening is multi-shot: one clingo Control instance grounds only the
         new step(t)/check(t) parts per horizon instead of regrounding the whole
@@ -211,6 +221,11 @@ class PLASPPlanner:
             return self._plan_pdr(max_horizon, deadline)
         if search != 'deepening':
             raise ValueError(f"search must be 'deepening' or 'pdr', not {search!r}")
+
+        if pdr_first > 0:
+            settled = self._pdr_first(pdr_first, max_horizon, deadline)
+            if settled is not None:
+                return settled
 
         ctl = clingo.Control(arguments=['-n', '1'])
         for path in self.encoding_paths:
@@ -380,6 +395,79 @@ class PLASPPlanner:
         ctl.load(self._pdr_path())
         ctl.add('base', [], self._pdr_facts())
         return ctl
+
+    def _pdr_first(self, budget, max_layers, deadline):
+        """Run PDR on the boolean abstraction for at most `budget` seconds.
+
+        Returns the plan or proof that settles the task, or None when the
+        deepening has to run: the budget ran out, the abstract plan is not a
+        real one, or the abstraction does not apply -- a temporal task, or a
+        boolean effect under a numeric condition, which the abstraction would
+        make fire always rather than maybe (so a reason learned there would
+        not hold for the real task).
+
+        Why the abstraction is otherwise sound: without the numeric layer,
+        numeric preconditions and goal conditions fall away, so more actions
+        apply and more states count as goals. That over-approximates
+        reachability, so "cannot reach the goal" there holds for the real
+        task, and so does a proof of unsolvability. The cubes it learns hold
+        too -- feeding them into the deepening as distance-to-goal
+        constraints was tried and measured, and cost more per step than it
+        saved on every instance, so only the plan and the proof are used.
+        """
+        if self.family.name != 'seq' or self.compiled_task.is_temporal or 'temporal' in self.layers:
+            self.logs.append('pdr_first skipped: not a seq classical or numeric task.')
+            return None
+        numeric = 'numeric' in self.layers
+        if numeric and any(line.startswith('orDisjunctNum(effect(') for line in self.compiled_task.fact_lines):
+            self.logs.append('pdr_first skipped: a boolean effect is conditioned on a numeric '
+                             'comparison, which the boolean abstraction cannot state soundly.')
+            return None
+        ctl = clingo.Control(arguments=['-n', '1'])
+        for name, path in zip(self.layers, self.encoding_paths):
+            if name != 'numeric':
+                ctl.load(path)
+        ctl.load(self._pdr_path())
+        ctl.add('base', [], self._pdr_facts())
+        start = time.monotonic()
+        run_deadline = start + budget if deadline is None else min(start + budget, deadline)
+        try:
+            pdr = PDR(ctl, self._pdr_static_fluents())
+            outcome = pdr.run(max_layers, run_deadline)
+        except RuntimeError as error:
+            refusal = refusal_from_clingo_error(error)
+            if refusal is None:
+                raise
+            raise refusal from error
+        elapsed = time.monotonic() - start
+        kind = outcome[0]
+        where = ' on the boolean abstraction' if numeric else ''
+        if kind == 'unsolvable':
+            self.status = PlanGenerationResultStatus.UNSOLVABLE_PROVEN
+            self.logs.append(f'PDR{where} proved the task unsolvable in {elapsed:.2f}s ({pdr.statistics()}).')
+            return self._empty_plan()
+        if kind == 'plan':
+            plan = self._pdr_plan_from(outcome[1])
+            if plan is not None:
+                self.logs.append(f'PDR found a plan in {elapsed:.2f}s{where}'
+                                 f'{", valid for the task" if numeric else ""} ({pdr.statistics()}).')
+                return plan
+            self.logs.append(f"PDR's plan{where} is not valid for the task ({elapsed:.2f}s); deepening.")
+            return None
+        self.logs.append(f'pdr_first: {kind} after {elapsed:.2f}s ({pdr.statistics()}); deepening.')
+        return None
+
+    def _pdr_plan_from(self, actions):
+        """A validated plan from PDR's action symbols, or None."""
+        steps = [self._construct_action(self._action_tuple(clingo.Function('occurs', [a, clingo.Number(0)])))
+                 for a in actions]
+        _plan = SequentialPlan(steps).replace_action_instances(self.compiled_task.map_back_action_instance)
+        is_valid, _reason = self.validate(_plan)
+        if not is_valid:
+            return None
+        self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
+        self.solved_horizon = len(steps)
+        return _plan
 
     def _plan_pdr(self, max_layers, deadline):
         self._check_pdr()

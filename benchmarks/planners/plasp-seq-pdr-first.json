@@ -1,0 +1,12 @@
+{
+    "planner-tag": "PLASPPlanner-seq-pdr-first",
+    "up-planner-name": "PLASPPlanner",
+    "up-planner-module": "aspplanners",
+    "planner-params": {
+        "encoding": "seq",
+        "pdr_first": 60,
+        "max_horizon": 1000,
+        "time_scale": 10
+    },
+    "tracks": ["classical", "numeric"]
+}
