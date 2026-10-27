@@ -292,3 +292,73 @@ PDR is **opt-in and classical-only**: `search="pdr"` on the `seq` or the `lifted
 What does work on numeric tasks is running PDR on their **boolean abstraction**: leave the numeric layer out, so numeric preconditions and goal conditions fall away, more actions apply and more states count as goals. That over-approximates reachability, so a proof of unsolvability found there holds for the real task, and a plan found there is a candidate the validator checks against the real task — real whenever the numbers were slack enough. `pdr_first=<seconds>` does exactly that before the deepening (`params={"pdr_first": 60}` through UP), on `seq` and on `lifted` (whose numeric step rules the abstraction leaves out with the layer): a proof or a validated plan ends the search, anything else hands over to the deepening unchanged. On a classical task the abstraction is the task itself, so this is simply PDR with a budget and deepening as the fallback. The one shape it skips is a boolean effect conditioned on a numeric comparison, which the abstraction would make fire always rather than maybe.
 
 On a 6-ball gripper with a fuel counter and fuel to spare, the abstract plan is valid and the task is solved in 3.3s where deepening needs 33s; with the fuel tight the abstract plan is rejected and the deepening does the work, so the cost is the budget. Feeding the learned cubes into the deepening as distance-to-goal constraints was also tried, and cost more per step than it saved on every instance, so it is not part of this. The benchmark configuration carries it as [plasp-seq-pdr-first.json](benchmarks/planners/plasp-seq-pdr-first.json) and [plasp-lifted-pdr-first.json](benchmarks/planners/plasp-lifted-pdr-first.json) on the classical and numeric tracks, and PDR alone as [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) and [plasp-lifted-pdr.json](benchmarks/planners/plasp-lifted-pdr.json) on the classical track.
+
+## Running the benchmarks
+
+The benchmark configuration lives in [benchmarks/](benchmarks/) and is read by [pyPMTEvalToolkit](https://github.com/pyPMT/pyPMTEvalToolkit), which sweeps any planner reachable through the Unified Planning API over the IPC-style benchmark repositories it clones. Nothing in this repository is a harness; see [benchmarks/README.md](benchmarks/README.md) for the details and for how the toolkit labels tracks.
+
+### What gets run
+
+[`benchmarks/exp-details.json`](benchmarks/exp-details.json) sets the limits (30 minutes, 8 GB, plans validated) and the task selection (both tracks, every instance). Each file under [`benchmarks/planners/`](benchmarks/planners/) is one planner configuration — the engine name, the module that registers it, and the engine options from the [table above](#engine-options):
+
+| file | engine options | tracks |
+|---|---|---|
+| [plasp-seq.json](benchmarks/planners/plasp-seq.json) | `encoding: seq` — horizon deepening | classical, numeric |
+| [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) | `encoding: seq`, `search: pdr` | classical |
+| [plasp-seq-pdr-first.json](benchmarks/planners/plasp-seq-pdr-first.json) | `encoding: seq`, `pdr_first: 60` | classical, numeric |
+| [plasp-lifted.json](benchmarks/planners/plasp-lifted.json) | `encoding: lifted` | classical, numeric |
+| [plasp-lifted-pdr.json](benchmarks/planners/plasp-lifted-pdr.json) | `encoding: lifted`, `search: pdr` | classical |
+| [plasp-lifted-pdr-first.json](benchmarks/planners/plasp-lifted-pdr-first.json) | `encoding: lifted`, `pdr_first: 60` | classical, numeric |
+| [aba-st.json](benchmarks/planners/aba-st.json) | `ABAPlanner`, stable semantics | classical |
+
+A `tracks` entry keeps a configuration off the tasks it refuses: PDR alone is classical-only, so its files do not list the numeric track. To sweep a subset of the planners, copy `benchmarks/` and delete the planner files you do not want; to narrow the tasks, edit `include-domains`, `exclude-domains`, `ipc-years` or `max-instances-per-domain` in the copy's `exp-details.json`.
+
+### Running a sweep
+
+```bash
+pip install -e .                                   # the engines the planner files name
+git clone https://github.com/pyPMT/pyPMTEvalToolkit.git
+cd pyPMTEvalToolkit
+./setup_benchmark.sh --config /path/to/ASPPlanners/benchmarks --yes
+```
+
+`setup_benchmark.sh` copies the configuration into a working experiment, creates a virtualenv, installs the toolkit and the engines, clones the benchmark repositories, generates the slurm arrays and prints the `sbatch` command. Before submitting, check that every planner file resolves to an engine — it is the fastest way to catch a missing install (`ABAPlanner` needs `pip install -e ".[aba]"`):
+
+```bash
+pypmtevalcli engines --exp-dir experiment
+```
+
+The stages can also be driven one by one, and everything but `solve` and `engines` is stdlib-only, so a sweep can be generated on a laptop and only the compute nodes carry the planners:
+
+```
+pypmtevalcli init | engines | discover | generate | solve | analyze | report
+```
+
+Results land as `results/<planner>/<task>.json` with `errors/` and `analysis/` beside them, and the two scripts in [results/](results/) read that layout:
+
+```bash
+python results/generate_results.py --sandbox-dir <sandbox>   # coverage and time tables
+python results/analyze_errors.py <sandbox>/errors            # cluster the failures: parser vs planner
+```
+
+### A quick local comparison
+
+To compare the configurations on one task without the toolkit, the engine options are the same ones the planner files carry:
+
+```python
+import time
+import aspplanners
+from unified_planning.io import PDDLReader
+from unified_planning.shortcuts import OneshotPlanner
+
+problem = PDDLReader().parse_problem("tests/pddl/gripper/domain.pddl", "tests/pddl/gripper/problem.pddl")
+for params in ({"encoding": "seq"}, {"encoding": "lifted"},
+               {"encoding": "seq", "search": "pdr"}, {"encoding": "seq", "pdr_first": 60}):
+    with OneshotPlanner(name="PLASPPlanner", params=params) as planner:
+        start = time.time()
+        result = planner.solve(problem, timeout=300)
+    steps = len(result.plan.actions) if result.plan is not None else 0
+    print(f"{params}: {result.status.name}, {steps} actions, {time.time() - start:.2f}s")
+```
+
+`result.log_messages` carries the planner's notes: which layers were loaded, and for PDR the number of queries and cubes.

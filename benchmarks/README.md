@@ -6,18 +6,26 @@ this repository's planners:
 
 ```
 benchmarks/
-├── exp-details.json          limits + task selection
+├── exp-details.json             limits + task selection
 └── planners/
-    ├── plasp-seq.json
-    └── aba-st.json
+    ├── plasp-seq.json               seq encoding, horizon deepening     (classical, numeric)
+    ├── plasp-seq-pdr.json           seq, search=pdr                     (classical)
+    ├── plasp-seq-pdr-first.json     seq, pdr_first=60 then deepening    (classical, numeric)
+    ├── plasp-lifted.json            lifted encoding, horizon deepening  (classical, numeric)
+    ├── plasp-lifted-pdr.json        lifted, search=pdr                  (classical)
+    ├── plasp-lifted-pdr-first.json  lifted, pdr_first=60 then deepening (classical, numeric)
+    └── aba-st.json                  ABAPlanner, stable semantics        (classical)
 ```
 
 The toolkit runs **any planner reachable through the Unified Planning API**, so
-nothing here is specific to ASPPlanners beyond the two planner files. Both name
-`up-planner-module: "aspplanners"`, which is how the toolkit reaches an engine
-that registers itself on import and ships no UP entry point — importing
+nothing here is specific to ASPPlanners beyond the planner files. All of them
+name `up-planner-module: "aspplanners"`, which is how the toolkit reaches an
+engine that registers itself on import and ships no UP entry point — importing
 `aspplanners` registers `PLASPPlanner` and `ABAPlanner` (see
-[`aspplanners/up_engines.py`](../aspplanners/up_engines.py)).
+[`aspplanners/up_engines.py`](../aspplanners/up_engines.py)). The
+`planner-params` of a file are the engine options the top-level README's
+[engine options table](../README.md#engine-options) lists; a file's `tracks`
+keeps it off the tasks its configuration refuses (PDR alone is classical-only).
 
 ## Running a sweep
 
