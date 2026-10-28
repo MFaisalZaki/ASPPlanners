@@ -321,6 +321,9 @@ class LiftedEncoder(PLASPEncoder):
                    for action in task.actions]
         facts = dict(result.facts)
         facts['_actions'] = {line for schema in schemas for line in schema.facts}
+        # The symmetry classes carry over; the objects a step mentions are read
+        # off arg/4 by lifted/symmetry.lp, so seq's mentions/2 rules do not.
+        facts['_symmetry'] = {line for line in facts.get('_symmetry', ()) if not line.startswith('mentions(')}
         # The initial state the seq compile emitted already carries the false
         # value of every fluent some literal reads as false: the lifted rules
         # read exactly the same literals (same parsers, same `negated_fluents`
@@ -336,6 +339,7 @@ class LiftedEncoder(PLASPEncoder):
             step_rules=[rule for schema in schemas for rule in schema.step_rules],
             numeric_step_rules=[rule for schema in schemas for rule in schema.numeric_step_rules],
             lifted=True,
+            symmetry_classes=result.symmetry_classes,
         )
 
     @classmethod

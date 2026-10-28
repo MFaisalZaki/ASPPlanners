@@ -79,7 +79,8 @@ def test_fact_predicates_reads_the_head_of_a_guarded_fact():
     (rover_recharge_problem,                   ("core", "numeric")),
     (disjunction_problem,                      ("core", "disjunctive")),
     (lambda: pddl("blocksworld"),              ("core",)),
-    (lambda: pddl("matchcellar"),              ("core", "temporal")),
+    # matchcellar's matches are interchangeable, so it carries the symmetry layer
+    (lambda: pddl("matchcellar"),              ("core", "symmetry", "temporal")),
     (lambda: pddl("arithdrive"),               ("core", "numeric", "temporal")),
 ])
 def test_a_task_loads_exactly_the_layers_it_uses(make_problem, expected):
@@ -114,6 +115,9 @@ def test_kind_and_facts_agree_across_the_bundled_domains():
             predicates = fact_predicates(planner.compiled_task.fact_lines)
             from_facts = SEQ.close(SEQ.layers_from_facts(predicates))
             from_kind = SEQ.close(SEQ.layers_from_kind(planner.task.kind))
+            # The symmetry layer is the encoder's, not a feature ProblemKind
+            # could know about: it is left out of the comparison.
+            from_facts = tuple(name for name in from_facts if name != "symmetry")
             assert from_facts == from_kind, os.path.relpath(problem_file, PDDL_DIR)
 
 

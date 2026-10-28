@@ -261,7 +261,7 @@ def test_the_lifted_step_program_is_smaller_where_action_arity_exceeds_predicate
 # ---------------------------------------------------------------------------
 
 def test_the_family_has_its_own_files_and_the_numeric_layer_is_seqs_verbatim():
-    assert LIFTED.layer_names == ("core", "numeric")
+    assert LIFTED.layer_names == ("core", "numeric", "symmetry")
     assert LIFTED.directory != SEQ.directory
     for name in LIFTED.layer_names:
         assert os.path.isfile(LIFTED.path(name)), name

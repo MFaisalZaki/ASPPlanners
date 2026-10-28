@@ -66,9 +66,6 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         abstraction of the task for at most that long before deepening; a
         proof of unsolvability or a validated plan ends the search, else the
         deepening runs as usual. Classical and numeric tasks.
-      - ``symmetry`` (``"off"`` default, ``"objects"``, ``"order"`` or
-        ``"all"``) -- symmetry-breaking constraints on the deepening, see
-        :mod:`aspplanners.plasp.symmetry`; seq encoding, plans stay shortest.
     """
 
     def __init__(self, **options):
@@ -182,13 +179,12 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         compilationlist = self.conf.get('compilationlist')
         search = self.conf.get('search', 'deepening')
         pdr_first = float(self.conf.get('pdr_first', 0))
-        symmetry = self.conf.get('symmetry', 'off')
 
         try:
             planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
                                    time_scale=time_scale)
             plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout,
-                                search=search, pdr_first=pdr_first, symmetry=symmetry)
+                                search=search, pdr_first=pdr_first)
         except NotImplementedError as refusal:
             return _unsupported_result(self.name, refusal)
         status = planner.status

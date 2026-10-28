@@ -179,6 +179,13 @@ SEQ_LAYERS: Tuple[Layer, ...] = (
         kind_features=('has_disjunctive_conditions', 'has_existential_conditions'),
     ),
     Layer(
+        name='symmetry',
+        filename='symmetry.lp',
+        summary='object symmetry breaking: interchangeable objects are first used in a fixed order',
+        requires=('core',),
+        owns=frozenset({'symClass', 'mentions'}),
+    ),
+    Layer(
         name='temporal',
         filename='temporal.lp',
         summary="PDDL 2.1 durative actions as SMTPlan-style happenings",
@@ -371,6 +378,13 @@ LIFTED_LAYERS: Tuple[Layer, ...] = (
         requires=('core',),
         owns=frozenset({'numVariable', 'numConst', 'numTerm', 'numGoal', 'numValueNeeded'}),
         kind_features=_SEQ_BY_NAME['numeric'].kind_features,
+    ),
+    Layer(
+        name='symmetry',
+        filename='symmetry.lp',
+        summary=_SEQ_BY_NAME['symmetry'].summary,
+        requires=('core',),
+        owns=frozenset({'symClass'}),
     ),
 )
 

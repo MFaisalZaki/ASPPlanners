@@ -15,7 +15,6 @@ from aspplanners.plasp.lifted import LiftedEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
 from aspplanners.plasp.pdr import PDR, read_lifted_action, read_seq_action
-from aspplanners.plasp.symmetry import MODES as SYMMETRY_MODES, symmetry_program
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
@@ -83,9 +82,9 @@ class PLASPPlanner:
         # The horizon the last plan() call found its plan at; under PDR, the
         # plan's length (plans there are not guaranteed shortest).
         self.solved_horizon: Optional[int] = None
-        # The interchangeable-object classes the last symmetry-breaking solve
-        # stated (see `aspplanners.plasp.symmetry`); empty until then.
-        self.symmetry_classes: list = []
+        # The classes of interchangeable objects the symmetry layer orders
+        # (see `aspplanners.plasp.symmetry`); empty when there are none.
+        self.symmetry_classes = self.compiled_task.symmetry_classes
 
     def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
         """Resolve the encoding layers for this task, explicit or inferred.
@@ -99,7 +98,11 @@ class PLASPPlanner:
         if explicit_layers is None:
             layers = self.family.select(predicates, kind=self.task.kind)
         else:
-            layers = self.family.close(explicit_layers)
+            # The symmetry layer is not a feature of the task a spec could be
+            # expected to name: it comes with the encoder's own facts whenever
+            # two objects are interchangeable, so it joins any explicit spec.
+            extra = ('symmetry',) if 'symClass' in predicates else ()
+            layers = self.family.close(tuple(explicit_layers) + extra)
         self.family.check_coverage(predicates, layers)
         return layers
 
@@ -202,7 +205,7 @@ class PLASPPlanner:
         return TimeTriggeredPlan([]) if self.compiled_task.is_temporal else SequentialPlan([])
 
     def plan(self, horizon=None, max_horizon=1000, timeout=None, search='deepening',
-             pdr_first: float = 0, symmetry: str = 'off'):
+             pdr_first: float = 0):
         """Iterative-deepening search over horizons 0..max_horizon, or a single
         solve at `horizon` when given, or -- with ``search='pdr'`` --
         property-directed reachability over the one-step program (see
@@ -220,13 +223,6 @@ class PLASPPlanner:
         case whenever the numbers were slack; otherwise the deepening runs
         as usual. Skipped, with a log line, on a temporal task and on the
         one shape that does not abstract soundly (see `_pdr_first`).
-
-        `symmetry` adds the seq encoding's symmetry-breaking layer to the
-        deepening (and to a fixed-horizon solve): ``'objects'`` orders the
-        first use of interchangeable objects, ``'order'`` orders adjacent
-        independent actions, ``'all'`` both; see `aspplanners.plasp.symmetry`.
-        Plans stay shortest. seq only, and skipped with a log line on a
-        temporal task.
 
         Deepening is multi-shot: one clingo Control instance grounds only the
         new step(t)/check(t) parts per horizon instead of regrounding the whole
@@ -259,7 +255,6 @@ class PLASPPlanner:
         ctl.add('base', [], self.task_facts)
         if self.step_rules:
             ctl.add('step', ['t'], self.step_rules)
-        self._add_symmetry(ctl, symmetry)
 
         if horizon is not None:
             parts = [('base', []), ('check', [clingo.Number(horizon)])]
@@ -290,35 +285,6 @@ class PLASPPlanner:
         self.logs.append(
             f'No plan found up to horizon {max_horizon} (the task may be solvable with a longer horizon).')
         return self._empty_plan()
-
-    # ------------------------------------------------------------------
-    # Symmetry breaking
-    # ------------------------------------------------------------------
-
-    def symmetry_program(self, mode: str) -> str:
-        """The facts and rules `aspplanners.plasp.symmetry` derives from the
-        task for `mode`; the object classes it found are in `self.symmetry_classes`."""
-        program, self.symmetry_classes = symmetry_program(self.task, mode)
-        return program
-
-    def _add_symmetry(self, ctl, mode: str) -> None:
-        if mode not in SYMMETRY_MODES:
-            raise ValueError(f"symmetry must be one of {SYMMETRY_MODES}, not {mode!r}")
-        if mode == 'off':
-            return
-        if self.family.name != 'seq':
-            raise ValueError("symmetry breaking is stated for the seq encoding only.")
-        if self.compiled_task.is_temporal:
-            self.logs.append('Symmetry breaking skipped: a temporal task (swapping snap '
-                             'actions changes the schedule).')
-            return
-        program = self.symmetry_program(mode)
-        ctl.load(os.path.join(self.family.directory, 'symmetry.lp'))
-        ctl.add('base', [], program)
-        if mode in ('objects', 'all'):
-            self.logs.append(
-                f'Symmetry breaking: {len(self.symmetry_classes)} object class(es) '
-                f'{[len(c) for c in self.symmetry_classes]}.')
 
     # ------------------------------------------------------------------
     # Solving
@@ -393,7 +359,7 @@ class PLASPPlanner:
         static fluents keep theirs), the family's layers, and pdr.lp."""
         self._check_pdr()
         sections = [f"%% Task facts (initial state renamed for PDR)\n{self._pdr_facts()}"]
-        for name, path in zip(self.layers, self.encoding_paths):
+        for name, path in self._pdr_layers():
             with open(path, 'r') as f:
                 sections.append(f"%% Layer: {name}\n{f.read()}")
         with open(self._pdr_path(), 'r') as f:
@@ -448,13 +414,21 @@ class PLASPPlanner:
         added, nothing grounded; PDR grounds it once and queries it for the
         whole search (see `aspplanners.plasp.pdr`)."""
         ctl = clingo.Control(arguments=['-n', '1'])
-        for path in self.encoding_paths:
+        for _name, path in self._pdr_layers():
             ctl.load(path)
         ctl.load(self._pdr_path())
         ctl.add('base', [], self._pdr_facts())
         if self.step_rules:
             ctl.add('step', ['t'], self.step_rules)
         return ctl
+
+    def _pdr_layers(self, skip=()):
+        """The (name, path) layers PDR's one-step program loads: every layer
+        but the symmetry one -- a query starts from an arbitrary state, where
+        the first-use order of interchangeable objects means nothing -- and
+        the ones in `skip` (the boolean abstraction leaves the numeric out)."""
+        return [(name, path) for name, path in zip(self.layers, self.encoding_paths)
+                if name != 'symmetry' and name not in skip]
 
     def _pdr_reader(self):
         return read_lifted_action if self.compiled_task.lifted else read_seq_action
@@ -487,9 +461,8 @@ class PLASPPlanner:
                              'comparison, which the boolean abstraction cannot state soundly.')
             return None
         ctl = clingo.Control(arguments=['-n', '1'])
-        for name, path in zip(self.layers, self.encoding_paths):
-            if name != 'numeric':
-                ctl.load(path)
+        for _name, path in self._pdr_layers(skip=('numeric',)):
+            ctl.load(path)
         ctl.load(self._pdr_path())
         ctl.add('base', [], self._pdr_facts())
         if self.boolean_step_rules:

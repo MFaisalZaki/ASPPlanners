@@ -1,43 +1,27 @@
-"""Symmetry breaking for the seq encoding.
+"""Object symmetry breaking (Rintanen 2003, "Symmetry reduction for SAT
+representations of transition systems"), always on.
 
-Two families of constraints, both stated as rules of
-``encodings/seq/symmetry.lp`` over facts this module derives from the task,
-and both *lex-leader* constraints: each symmetry class of plans keeps at
-least the member that is smallest under clingo's own term order, so a task
-keeps a plan at every horizon it had one at and the shortest horizon is
+Two objects of the same type are interchangeable when swapping them everywhere
+leaves the initial state and the goal unchanged and neither is named by an
+action schema as a constant. The interchangeable objects of a type form
+classes on which the full symmetric group acts (two transpositions that are
+automorphisms generate a third), so any plan can be relabelled so that the
+objects of a class are first used in a fixed order -- and the deepening then
+proves each unsatisfiable horizon once instead of once per relabelling. The
+constraint says exactly that: object i+1 of a class may not be used before
+object i. It is a lex-leader constraint under clingo's own term order (the
+classes are indexed in the order of their ``constant("name")`` terms), so the
+term-smallest plan of every class survives and the shortest horizon is
 unchanged.
 
-**Object symmetries** (Rintanen 2003, "Symmetry reduction for SAT
-representations of transition systems"). Two objects of the same type are
-interchangeable when swapping them everywhere leaves the initial state and
-the goal unchanged and neither is named by an action schema as a constant.
-The interchangeable objects of a type form classes on which the full
-symmetric group acts (two transpositions that are automorphisms generate a
-third), so any plan can be relabelled so that the objects of a class are
-first used in a fixed order. The constraint says exactly that: object i+1
-of a class may not be used before object i. The classes are
-``symClass(Class, Index, constant("name"))`` facts, indexed in clingo's order
-of the constant terms, and which objects an action mentions is stated per
-schema as ``mentions(action(("pick", B, R, G)), B) :- action(...)`` rules.
-
-**Plan permutation symmetries** (Long & Fox 2003). Two adjacent actions of
-a sequential plan that are independent -- neither writes a variable the
-other reads or writes -- can be swapped without changing the plan's effect,
-so a plan is required to list such pairs in ascending term order. The
-independence relation is computed by the layer itself from the action facts
-(``interferes/2``, variable-level, which is coarser than the value-level
-relation but needs no case analysis), and the constraint is a single rule
-over ``occurs(A, t-1), occurs(B, t)``.
-
-The two are sound together: of all the plans reachable from a given one by
-relabelling and swapping, the lexicographically smallest satisfies both.
-That argument needs the class index order to agree with clingo's term order
-on the constants, which is why the classes are sorted by `clingo.Symbol`
-comparison rather than by name.
-
-Neither constraint is stated for a temporal task: a snap action's position
-is coupled to its partner's by the duration, and a swap changes the
-schedule, so the layer is not loaded there.
+The encoder states the classes as ``symClass(Class, Index, constant("name"))``
+facts and, for the seq family, which objects an action mentions as one
+``mentions(action(("pick", B, R, G)), B) :- action(...)`` rule per schema
+parameter; the ``symmetry`` layer of each family (``encodings/*/symmetry.lp``)
+reads them. The lifted family reads the objects off ``arg/4`` instead. A
+temporal task is covered too: a relabelled schedule is a schedule with the
+same happenings. PDR leaves the layer out, since its one-step program starts
+from an arbitrary state where "first use" has no meaning.
 """
 
 from typing import Dict, FrozenSet, Iterable, List, Set, Tuple
@@ -46,9 +30,6 @@ import clingo
 from unified_planning.model import Problem
 
 from aspplanners.plasp.facts import asp_name, _head_term, _signature
-
-MODES = ('off', 'objects', 'order', 'all')
-
 
 def _canonical(f) -> tuple:
     """A hashable rendering of an FNode in which the arguments of commutative
@@ -183,10 +164,12 @@ def object_classes(problem: Problem) -> List[List[str]]:
     return result
 
 
-def mentions_rules(problem: Problem) -> List[str]:
-    """``mentions(action(H), P) :- action(action(H)).`` per action parameter."""
+def mentions_rules(actions: Iterable) -> List[str]:
+    """``mentions(action(H), P) :- action(action(H)).`` per parameter of each
+    of `actions` -- the actions the facts declare, which on a temporal task
+    are the snap actions rather than the problem's durative ones."""
     rules = []
-    for action in problem.actions:
+    for action in actions:
         signature = _signature(action.parameters)
         if not signature:
             continue
@@ -196,20 +179,16 @@ def mentions_rules(problem: Problem) -> List[str]:
     return rules
 
 
-def symmetry_program(problem: Problem, mode: str) -> Tuple[str, List[List[str]]]:
-    """The base-part program enabling the chosen constraints, and the object
-    classes it states (empty when none were found or `mode` leaves them out)."""
-    if mode not in MODES:
-        raise ValueError(f"symmetry must be one of {MODES}, not {mode!r}")
+def symmetry_facts(problem: Problem, actions: Iterable) -> Tuple[List[str], List[List[str]]]:
+    """The fact lines of the symmetry layer for `problem` (classes, and the
+    mentions rules over `actions`), and the classes themselves. Empty when
+    no two objects are interchangeable."""
+    classes = object_classes(problem)
+    if not classes:
+        return [], []
     lines: List[str] = []
-    classes: List[List[str]] = []
-    if mode in ('objects', 'all'):
-        classes = object_classes(problem)
-        for c, members in enumerate(classes):
-            for i, name in enumerate(members):
-                lines.append(f'symClass({c}, {i}, constant("{asp_name(name)}")).')
-        if classes:
-            lines += mentions_rules(problem)
-    if mode in ('order', 'all'):
-        lines.append('symOrder.')
-    return '\n'.join(lines), classes
+    for c, members in enumerate(classes):
+        for i, name in enumerate(members):
+            lines.append(f'symClass({c}, {i}, constant("{asp_name(name)}")).')
+    lines += mentions_rules(actions)
+    return lines, classes

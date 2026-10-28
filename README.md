@@ -88,7 +88,6 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
 | `search` | PLASP | `"deepening"` | `"pdr"`: property-directed reachability instead of horizon deepening, see [PDR](#property-directed-reachability); classical tasks on `seq` or `lifted`, `max_horizon` bounds its layers |
 | `pdr_first` | PLASP | 0 | seconds of PDR on the task's boolean abstraction before deepening: a proof of unsolvability or a validated plan ends the search, see [PDR first](#pdr-first-on-the-boolean-abstraction); classical and numeric tasks |
-| `symmetry` | PLASP | `"off"` | symmetry-breaking constraints on the deepening: `"objects"` (first-use order of interchangeable objects), `"order"` (adjacent independent actions in term order) or `"all"`, see [Symmetry breaking](#symmetry-breaking); `seq`, plans stay shortest |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
 | `encoding` | PLASP | `"seq"` | encoding family: `"seq"` or `"lifted"`, see [Encoding families](#encoding-families) |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
@@ -296,19 +295,21 @@ On a 6-ball gripper with a fuel counter and fuel to spare, the abstract plan is 
 
 ## Symmetry breaking
 
-The deepening pays for every horizon below the shortest plan with a proof that no plan of that length exists, and on a task with interchangeable objects clasp proves it once per relabelling: a 6-ball gripper has 720 ways to name the balls and the proof at each unsatisfiable horizon is repeated for each. `symmetry="objects"` states the lex-leader constraint that collapses them (Rintanen 2003): two objects of a type are interchangeable when swapping them leaves the initial state and the goal unchanged and no action schema names either as a constant, the interchangeable objects form classes under the full symmetric group, and object *i+1* of a class may not be used by an action before object *i*. [symmetry.py](aspplanners/plasp/symmetry.py) finds the classes on the compiled task (an exact swap check per candidate pair, after bucketing by the shape of each object's own initial facts) and states them as `symClass(Class, Index, constant("name"))` facts, indexed in clingo's own term order of the constants; which objects an action mentions is one `mentions/2` rule per schema parameter. [seq/symmetry.lp](aspplanners/plasp/encodings/seq/symmetry.lp) then needs three rules: `used/2`, its monotone closure, and the constraint.
+The deepening pays for every horizon below the shortest plan with a proof that no plan of that length exists, and on a task with interchangeable objects clasp proves it once per relabelling: a 6-ball gripper has 720 ways to name the balls and the proof at each unsatisfiable horizon is repeated for each. Every encoding therefore carries the lex-leader constraint that collapses them (Rintanen 2003), always on: two objects of a type are interchangeable when swapping them leaves the initial state and the goal unchanged and no action schema names either as a constant, the interchangeable objects form classes under the full symmetric group, and object *i+1* of a class may not be used by an action before object *i*. [symmetry.py](aspplanners/plasp/symmetry.py) finds the classes on the compiled task (an exact swap check per candidate pair, after bucketing by the shape of each object's own initial facts) and the encoder states them as `symClass(Class, Index, constant("name"))` facts, indexed in clingo's own term order of the constants, plus one `mentions/2` rule per schema parameter saying which objects an action names. The `symmetry` layer of each family is then three rules — `used/2`, its monotone closure, and the constraint — over `occurs/2` in [seq/symmetry.lp](aspplanners/plasp/encodings/seq/symmetry.lp) and over the chosen arguments `arg/4` in [lifted/symmetry.lp](aspplanners/plasp/encodings/lifted/symmetry.lp). The layer is selected like any other, by its facts, so a task without interchangeable objects does not load it; PDR leaves it out, since its one-step queries start from arbitrary states where "first use" means nothing.
 
-`symmetry="order"` adds the plan-permutation constraint (Long & Fox 2003): two adjacent actions neither of which writes a variable the other reads or writes can be swapped, so a plan has to list them in ascending term order. The independence relation is computed in the layer from the action facts at the level of variables, and an action whose shape the layer does not analyse (a numeric conditional effect, a numeric disjunct) interferes with everything. `symmetry="all"` is both. Each constraint keeps the term-smallest plan of every symmetry class, and the two are compatible because the class index order is clingo's term order, so the shortest horizon is unchanged; every bundled domain is solved at the same horizon with them as without ([tests/test_symmetry.py](tests/test_symmetry.py)). Temporal tasks skip the layer with a log line (a swap of snap actions changes the schedule), and the lifted encoding does not have it yet.
+The constraint keeps the term-smallest plan of every relabelling class, so the shortest horizon is unchanged; [tests/test_symmetry.py](tests/test_symmetry.py) pins that on every bundled domain, classical, numeric and temporal, by solving each with the layer stripped as well. The classes are exact — a goal that names an object, or an initial state that tells two apart, keeps them out of any class — so a task without them pays only the detection, a pass over the initial state. `planner.symmetry_classes` lists what was found.
 
-Measured on the seq deepening, 300s/600s limits:
+An *order* constraint on adjacent independent actions (Long & Fox 2003: two adjacent actions neither of which writes a variable the other reads or writes have to appear in ascending term order) was built and measured alongside and is not part of this: on its own it changed the 6-ball gripper from 28.4s to 26.7s, because learned nogoods already transfer between the two orderings, and it grounds a pair per step for every independent pair of ground actions.
 
-| task | `off` | `objects` | `order` | `all` |
-|---|---|---|---|---|
-| gripper, 6 balls (h=17) | 28.4s | 0.41s | 26.7s | 0.47s |
-| fuel gripper, 6 balls, numeric (h=17) | 30.8s | 0.62s | — | 0.71s |
-| gripper, 12 balls (h=35) | horizon 19 reached at 613s, timeout | 728s (horizons 0–33 in 88s, 34 in 455s, 35 in 184s) | — | timeout at 600s, solving h=35 |
+Measured on the seq deepening, with the layer stripped against with it:
 
-The object constraint is where the gain is: the refutation of each horizon below the optimum no longer repeats per relabelling. It does not change the shape of the curve, though: on the 12-ball gripper the time per horizon still grows about fourfold per step near the optimum, and the last unsatisfiable horizon alone costs 455s, so the constraint moves the wall by a few horizons rather than removing it. The order constraint on its own changes little, because learned nogoods already transfer between orderings of two independent actions, and it grounds a `swappable/2` pair per step for every independent pair of ground actions, so it is kept separate and is not the default. The classes are exact (a goal that names an object, or an initial state that tells two apart, keeps them out of any class), so a task without them pays only the detection, which is a pass over the initial state. The benchmark configuration carries it as [plasp-seq-symmetry.json](benchmarks/planners/plasp-seq-symmetry.json) on both tracks.
+| task | without | with |
+|---|---|---|
+| gripper, 6 balls (h=17) | 28.4s | 0.41s |
+| fuel gripper, 6 balls, numeric (h=17) | 30.8s | 0.62s |
+| gripper, 12 balls (h=35) | horizon 19 reached at 613s, timeout | 728s (horizons 0–33 in 88s, 34 in 455s, 35 in 184s) |
+
+The refutation of each horizon below the optimum no longer repeats per relabelling. It does not change the shape of the curve, though: on the 12-ball gripper the time per horizon still grows about fourfold per step near the optimum, and the last unsatisfiable horizon alone costs 455s, so the constraint moves the wall by a few horizons rather than removing it.
 
 ## Running the benchmarks
 
@@ -321,7 +322,6 @@ The benchmark configuration lives in [benchmarks/](benchmarks/) and is read by [
 | file | engine options | tracks |
 |---|---|---|
 | [plasp-seq.json](benchmarks/planners/plasp-seq.json) | `encoding: seq` — horizon deepening | classical, numeric |
-| [plasp-seq-symmetry.json](benchmarks/planners/plasp-seq-symmetry.json) | `encoding: seq`, `symmetry: all` | classical, numeric |
 | [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) | `encoding: seq`, `search: pdr` | classical |
 | [plasp-seq-pdr-first.json](benchmarks/planners/plasp-seq-pdr-first.json) | `encoding: seq`, `pdr_first: 60` | classical, numeric |
 | [plasp-lifted.json](benchmarks/planners/plasp-lifted.json) | `encoding: lifted` | classical, numeric |

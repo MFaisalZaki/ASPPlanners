@@ -63,6 +63,7 @@ from aspplanners.plasp.facts import (
     ASPGoalDisjunction,
 )
 from aspplanners.plasp.numeric_terms import NumericContext
+from aspplanners.plasp.symmetry import symmetry_facts
 
 
 def _check_asp_name_collisions(problem: Problem, action_names) -> None:
@@ -131,6 +132,10 @@ class ASPEncodingResult:
     # Whether a model names its actions as schema/2 + arg/4 (lifted) rather
     # than occurs/2; decides how the planner reads a plan off it.
     lifted: bool = False
+    # The classes of interchangeable objects the symmetry layer orders (see
+    # aspplanners.plasp.symmetry), each in clingo's term order; empty when no
+    # two objects are interchangeable.
+    symmetry_classes: List[List[str]] = field(default_factory=list)
 
     @property
     def fact_lines(self) -> Set[str]:
@@ -363,6 +368,11 @@ class PLASPEncoder:
         # step-0 fact it can never be satisfied. That is what makes
         # up_negative_conditions_remover unnecessary -- the encoding tracks the
         # false value directly instead of a task needing a mirror fluent.
+        # The objects no initial fact, goal or schema tells apart, and which
+        # objects each declared action names -- the symmetry layer's facts.
+        # Computed on the actions the facts declare (the snap actions of a
+        # temporal task), whose parameters the mentions/2 rules range over.
+        symmetry_lines, symmetry_classes = symmetry_facts(new_problem, [a for a, _guard in asp_actions])
         asp_actions = [(ASPAction(action, static_fluent_names, guard, numeric_context), guard)
                        for action, guard in asp_actions]
         goal_terms = list(chain.from_iterable(
@@ -395,6 +405,7 @@ class PLASPEncoder:
             '_goal_state':     _render_facts(goal_terms),
             '_durative':       _render_facts(durative_facts),
             '_time':           {'minSeparation(1).'} if durative_facts else set(),
+            '_symmetry':       set(symmetry_lines),
         }
 
         return ASPEncodingResult(
@@ -405,6 +416,7 @@ class PLASPEncoder:
             time_unit=time_unit,
             numeric_scale=numeric_scale,
             is_temporal=temporal or bool(snap_actions),
+            symmetry_classes=symmetry_classes,
         )
 
     # ------------------------------------------------------------------
