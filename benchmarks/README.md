@@ -9,6 +9,7 @@ benchmarks/
 ├── exp-details.json             limits + task selection
 └── planners/
     ├── plasp-seq.json               seq encoding, horizon deepening     (classical, numeric)
+    ├── plasp-seq-symmetry.json      seq, symmetry=all                   (classical, numeric)
     ├── plasp-seq-pdr.json           seq, search=pdr                     (classical)
     ├── plasp-seq-pdr-first.json     seq, pdr_first=60 then deepening    (classical, numeric)
     ├── plasp-lifted.json            lifted encoding, horizon deepening  (classical, numeric)

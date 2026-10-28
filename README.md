@@ -88,6 +88,7 @@ print(planner.layers)   # ('core', 'numeric') — the encoding layers this task 
 | `horizon` | both | — | solve at one fixed horizon instead of deepening |
 | `search` | PLASP | `"deepening"` | `"pdr"`: property-directed reachability instead of horizon deepening, see [PDR](#property-directed-reachability); classical tasks on `seq` or `lifted`, `max_horizon` bounds its layers |
 | `pdr_first` | PLASP | 0 | seconds of PDR on the task's boolean abstraction before deepening: a proof of unsolvability or a validated plan ends the search, see [PDR first](#pdr-first-on-the-boolean-abstraction); classical and numeric tasks |
+| `symmetry` | PLASP | `"off"` | symmetry-breaking constraints on the deepening: `"objects"` (first-use order of interchangeable objects), `"order"` (adjacent independent actions in term order) or `"all"`, see [Symmetry breaking](#symmetry-breaking); `seq`, plans stay shortest |
 | `time_scale` | both | 10 | resolution of the temporal encoding, see [`time_scale`](#time_scale) |
 | `encoding` | PLASP | `"seq"` | encoding family: `"seq"` or `"lifted"`, see [Encoding families](#encoding-families) |
 | `semantics` | ABA | `"ST"` | aspforaba extension semantics |
@@ -293,6 +294,21 @@ What does work on numeric tasks is running PDR on their **boolean abstraction**:
 
 On a 6-ball gripper with a fuel counter and fuel to spare, the abstract plan is valid and the task is solved in 3.3s where deepening needs 33s; with the fuel tight the abstract plan is rejected and the deepening does the work, so the cost is the budget. Feeding the learned cubes into the deepening as distance-to-goal constraints was also tried, and cost more per step than it saved on every instance, so it is not part of this. The benchmark configuration carries it as [plasp-seq-pdr-first.json](benchmarks/planners/plasp-seq-pdr-first.json) and [plasp-lifted-pdr-first.json](benchmarks/planners/plasp-lifted-pdr-first.json) on the classical and numeric tracks, and PDR alone as [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) and [plasp-lifted-pdr.json](benchmarks/planners/plasp-lifted-pdr.json) on the classical track.
 
+## Symmetry breaking
+
+The deepening pays for every horizon below the shortest plan with a proof that no plan of that length exists, and on a task with interchangeable objects clasp proves it once per relabelling: a 6-ball gripper has 720 ways to name the balls and the proof at each unsatisfiable horizon is repeated for each. `symmetry="objects"` states the lex-leader constraint that collapses them (Rintanen 2003): two objects of a type are interchangeable when swapping them leaves the initial state and the goal unchanged and no action schema names either as a constant, the interchangeable objects form classes under the full symmetric group, and object *i+1* of a class may not be used by an action before object *i*. [symmetry.py](aspplanners/plasp/symmetry.py) finds the classes on the compiled task (an exact swap check per candidate pair, after bucketing by the shape of each object's own initial facts) and states them as `symClass(Class, Index, constant("name"))` facts, indexed in clingo's own term order of the constants; which objects an action mentions is one `mentions/2` rule per schema parameter. [seq/symmetry.lp](aspplanners/plasp/encodings/seq/symmetry.lp) then needs three rules: `used/2`, its monotone closure, and the constraint.
+
+`symmetry="order"` adds the plan-permutation constraint (Long & Fox 2003): two adjacent actions neither of which writes a variable the other reads or writes can be swapped, so a plan has to list them in ascending term order. The independence relation is computed in the layer from the action facts at the level of variables, and an action whose shape the layer does not analyse (a numeric conditional effect, a numeric disjunct) interferes with everything. `symmetry="all"` is both. Each constraint keeps the term-smallest plan of every symmetry class, and the two are compatible because the class index order is clingo's term order, so the shortest horizon is unchanged; every bundled domain is solved at the same horizon with them as without ([tests/test_symmetry.py](tests/test_symmetry.py)). Temporal tasks skip the layer with a log line (a swap of snap actions changes the schedule), and the lifted encoding does not have it yet.
+
+Measured on the seq deepening, 300s/600s limits:
+
+| task | `off` | `objects` | `order` | `all` |
+|---|---|---|---|---|
+| gripper, 6 balls (h=17) | 28.4s | 0.41s | 26.7s | 0.47s |
+| fuel gripper, 6 balls, numeric (h=17) | 30.8s | 0.62s | — | 0.71s |
+
+The object constraint is where the gain is: the refutation of each horizon below the optimum no longer repeats per relabelling. The order constraint on its own changes little, because learned nogoods already transfer between orderings of two independent actions, and it grounds a `swappable/2` pair per step for every independent pair of ground actions, so it is kept separate and is not the default. The classes are exact (a goal that names an object, or an initial state that tells two apart, keeps them out of any class), so a task without them pays only the detection, which is a pass over the initial state. The benchmark configuration carries it as [plasp-seq-symmetry.json](benchmarks/planners/plasp-seq-symmetry.json) on both tracks.
+
 ## Running the benchmarks
 
 The benchmark configuration lives in [benchmarks/](benchmarks/) and is read by [pyPMTEvalToolkit](https://github.com/pyPMT/pyPMTEvalToolkit), which sweeps any planner reachable through the Unified Planning API over the IPC-style benchmark repositories it clones. Nothing in this repository is a harness; see [benchmarks/README.md](benchmarks/README.md) for the details and for how the toolkit labels tracks.
@@ -304,6 +320,7 @@ The benchmark configuration lives in [benchmarks/](benchmarks/) and is read by [
 | file | engine options | tracks |
 |---|---|---|
 | [plasp-seq.json](benchmarks/planners/plasp-seq.json) | `encoding: seq` — horizon deepening | classical, numeric |
+| [plasp-seq-symmetry.json](benchmarks/planners/plasp-seq-symmetry.json) | `encoding: seq`, `symmetry: all` | classical, numeric |
 | [plasp-seq-pdr.json](benchmarks/planners/plasp-seq-pdr.json) | `encoding: seq`, `search: pdr` | classical |
 | [plasp-seq-pdr-first.json](benchmarks/planners/plasp-seq-pdr-first.json) | `encoding: seq`, `pdr_first: 60` | classical, numeric |
 | [plasp-lifted.json](benchmarks/planners/plasp-lifted.json) | `encoding: lifted` | classical, numeric |
