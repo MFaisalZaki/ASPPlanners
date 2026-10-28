@@ -306,8 +306,9 @@ Measured on the seq deepening, 300s/600s limits:
 |---|---|---|---|---|
 | gripper, 6 balls (h=17) | 28.4s | 0.41s | 26.7s | 0.47s |
 | fuel gripper, 6 balls, numeric (h=17) | 30.8s | 0.62s | — | 0.71s |
+| gripper, 12 balls (h=35) | horizon 19 reached at 613s, timeout | 728s (horizons 0–33 in 88s, 34 in 455s, 35 in 184s) | — | timeout at 600s, solving h=35 |
 
-The object constraint is where the gain is: the refutation of each horizon below the optimum no longer repeats per relabelling. The order constraint on its own changes little, because learned nogoods already transfer between orderings of two independent actions, and it grounds a `swappable/2` pair per step for every independent pair of ground actions, so it is kept separate and is not the default. The classes are exact (a goal that names an object, or an initial state that tells two apart, keeps them out of any class), so a task without them pays only the detection, which is a pass over the initial state. The benchmark configuration carries it as [plasp-seq-symmetry.json](benchmarks/planners/plasp-seq-symmetry.json) on both tracks.
+The object constraint is where the gain is: the refutation of each horizon below the optimum no longer repeats per relabelling. It does not change the shape of the curve, though: on the 12-ball gripper the time per horizon still grows about fourfold per step near the optimum, and the last unsatisfiable horizon alone costs 455s, so the constraint moves the wall by a few horizons rather than removing it. The order constraint on its own changes little, because learned nogoods already transfer between orderings of two independent actions, and it grounds a `swappable/2` pair per step for every independent pair of ground actions, so it is kept separate and is not the default. The classes are exact (a goal that names an object, or an initial state that tells two apart, keeps them out of any class), so a task without them pays only the detection, which is a pass over the initial state. The benchmark configuration carries it as [plasp-seq-symmetry.json](benchmarks/planners/plasp-seq-symmetry.json) on both tracks.
 
 ## Running the benchmarks
 
