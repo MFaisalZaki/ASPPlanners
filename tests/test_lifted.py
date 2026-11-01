@@ -333,19 +333,21 @@ def test_disjunctive_tasks_are_solved_at_seqs_horizon(make_problem):
     # A bridging rule exactly for the schemas whose own groups exist (briefcase
     # carries its disjunction on a conditional effect, which needs none).
     action_groups = {line.split('"')[1] for line in lifted.compiled_task.fact_lines
-                     if line.startswith("orGroup(action(")}
+                     if line.startswith("orGroup(disj(")}
     bridged = {rule.split('"')[1] for rule in lifted.compiled_task.step_rules if rule.startswith("occurs(")}
     assert bridged == action_groups
     seq, _ = solve(make_problem(), "seq")
     assert lifted.solved_horizon == seq.solved_horizon
 
 
-def test_the_bridging_rule_is_emitted_only_for_schemas_with_a_disjunction():
+def test_the_bridging_rule_ranges_only_the_parameters_the_disjunction_mentions():
     planner = PLASPPlanner(pddl("lift"), "lifted")
-    bridged = {rule.split('"')[1] for rule in planner.compiled_task.step_rules if rule.startswith("occurs(")}
-    disjunctive = {a.name for a in planner.task.actions
-                   if any(" or " in str(c) or "Exists" in str(c) or "implies" in str(c) for c in a.preconditions)}
-    assert bridged and bridged <= {asp_name(n) for n in disjunctive}
+    bridges = [rule for rule in planner.compiled_task.step_rules if rule.startswith("occurs(")]
+    # lift's `up(f1, f2)` has one forall/imply condition over the passengers
+    # alone: its key names the schema and the disjunction and no parameter.
+    assert bridges == ['occurs(disj(("up",0)), t) :- schema("up", t).']
+    assert any(line.startswith('orGroup(disj(("up",0)), or(0,Q_P)) :- has(Q_P, type("passenger")).')
+               for line in planner.compiled_task.fact_lines)
 
 
 def test_a_conditional_effect_with_a_disjunctive_condition():

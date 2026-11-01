@@ -54,14 +54,17 @@ constant and expression-valued increase, decrease and assign effects.
 Disjunctive conditions use seq's disjunctive layer as it is. Its facts are
 keyed by a ground action term and its one action-level constraint reads
 `occurs(A, t)`, so a schema with a disjunctive precondition gets the same
-orGroup/orDisjunct facts seq would build for it (ranged by the parameters'
-types) and one bridging step rule deriving the ground action term from the
-step's schema and arguments:
+orGroup/orDisjunct facts seq would build for it and one bridging step rule
+deriving the key from the step's schema and arguments:
 
-    occurs(action(("stop",F)), t) :- schema("stop", t), arg("stop", 1, F, t).
+    occurs(disj(("stop",0,F)), t) :- schema("stop", t), arg("stop", 1, F, t).
 
-That is one derived atom per binding per step, seq's price, paid only by the
-schemas that have a disjunction; the goal rules and the effect-condition
+The key names the schema, the disjunction and only the parameters the
+condition mentions, so the facts range over those parameters' types rather
+than the whole signature (seq ranges its over the action declaration, which
+for a wide schema is objects to the power of its arity): one derived atom per
+binding of those parameters per step, paid only by the schemas that have a
+disjunction. The goal rules and the effect-condition
 groups read the state alone and need no bridge. A conditional effect whose
 condition is disjunctive carries the groups on an effect term of its own and
 requires them in its `caused` rule the way core's does.
@@ -79,8 +82,8 @@ from aspplanners.plasp.encoder import ASPEncodingResult, PLASPEncoder
 
 from aspplanners.plasp.facts import (
     ASPDisjunction, ASPEquality, ASPExpr, ASPNumComparison, _dedup, _effect_bindings,
-    _effect_constant, _effect_expr, _fold_fractional_statics, _head_term, _lin_add,
-    _lin_scale, _linear_form, _or_facts, _reads_fluents, _signature, _variable_terms,
+    _effect_constant, _effect_expr, _fold_fractional_statics, _lin_add,
+    _lin_scale, _linear_form, _or_facts, _reads_fluents, _variable_terms,
     asp_name, flatten_atoms, parseexpr,
 )
 from aspplanners.plasp.numeric_terms import NO_FOLDING
@@ -121,12 +124,7 @@ class LiftedAction:
                       for p in action.parameters}
         self.static_fluents = static_fluents
         self.negated_fluents: Set[str] = set()
-        # The ground action term seq would use, with the same parameter
-        # variables as the arg atoms bind: the key of the disjunctive layer's
-        # facts, and the head of the bridging rule that derives it per step.
-        self.head = f'action({_head_term(action.name, _signature(action.parameters))})'
         self._group_index = 0
-        self._bridge = False
         self.facts: List[str] = [f'schema({self.term}).']
         for p in action.parameters:
             self.facts.append(
@@ -136,10 +134,6 @@ class LiftedAction:
         self._preconditions(action)
         self._effects(action)
         self._numeric_effects(action)
-        if self._bridge:
-            guard = [f'schema({self.term}, t)'] + [
-                f'arg({self.term}, {self.index[p.name]}, {self.var[p.name]}, t)' for p in action.parameters]
-            self.step_rules.append(f"occurs({self.head}, t) :- {', '.join(guard)}.")
 
     # -- pieces ------------------------------------------------------------
 
@@ -195,18 +189,28 @@ class LiftedAction:
 
     # -- preconditions -------------------------------------------------------
 
+    def _disjunction(self, disjunction: ASPDisjunction, fnode) -> None:
+        """seq's orGroup/orDisjunct facts for one disjunctive precondition,
+        keyed by a term of this schema and the parameters the condition
+        mentions (`fnode`), ranged by their types -- not by the whole
+        signature, which for a wide schema is objects to the power of its
+        arity. The layer's one constraint reads occurs(A, t) for the key, so a
+        bridging step rule derives it from the step's schema and arguments."""
+        names = sorted(_parameter_names(fnode), key=self.index.get)
+        key = f'disj(({self.term},{self._group_index}' + ''.join(f',{self.var[n]}' for n in names) + '))'
+        self.facts += _or_facts(disjunction, '0', owner=key,
+                                body_prefix=[self.types[n] for n in names])
+        guard = [f'schema({self.term}, t)'] + [f'arg({self.term}, {self.index[n]}, {self.var[n]}, t)' for n in names]
+        self.step_rules.append(f"occurs({key}, t) :- {', '.join(guard)}.")
+        self.negated_fluents |= disjunction.negated_fluent_names
+        self._group_index += 1
+
     def _preconditions(self, action) -> None:
-        for precondition in action.preconditions:
+        conjuncts = [c for pre in action.preconditions for c in (pre.args if pre.is_and() else [pre])]
+        for precondition in conjuncts:
             for literal in flatten_atoms(parseexpr(precondition, context=self.context)):
                 if isinstance(literal, ASPDisjunction):
-                    # seq's own orGroup/orDisjunct facts for the action term,
-                    # ranged by the parameters' types; the layer's constraint
-                    # reads occurs/2, which the bridging rule derives.
-                    self.facts += _or_facts(literal, str(self._group_index), owner=self.head,
-                                            body_prefix=list(self.types.values()))
-                    self.negated_fluents |= literal.negated_fluent_names
-                    self._group_index += 1
-                    self._bridge = True
+                    self._disjunction(literal, precondition)
                     continue
                 if isinstance(literal, ASPNumComparison):
                     self._numeric_precondition(literal)
@@ -267,9 +271,10 @@ class LiftedAction:
             forall_names, forall_bindings = _variable_terms(eff.forall)
             body = self._guard(eff.fluent, eff.condition) + forall_bindings + list(target.bindings)
             # The effect's own term, for the groups of a disjunctive condition:
-            # the schema's parameters and the effect's forall variables tell
-            # one binding's groups from another's.
-            effect_vars = [self.var[p.name] for p in action.parameters] + list(forall_names)
+            # the parameters the condition mentions and the effect's forall
+            # variables tell one binding's groups from another's.
+            cond_names = sorted(_parameter_names(eff.condition), key=self.index.get)
+            effect_vars = [self.var[n] for n in cond_names] + list(forall_names)
             effect_term = f'effect(({self.term},{effect_index}' + ''.join(f',{v}' for v in effect_vars) + '))'
             groups = 0
             for literal in flatten_atoms(parseexpr(eff.condition)):
@@ -277,7 +282,7 @@ class LiftedAction:
                     self._refuse("a numeric effect condition", f"action {action.name}")
                 if isinstance(literal, ASPDisjunction):
                     self.facts += _or_facts(literal, str(groups), owner=effect_term,
-                                            body_prefix=_dedup(list(self.types.values()) + forall_bindings))
+                                            body_prefix=_dedup([self.types[n] for n in cond_names] + forall_bindings))
                     self.negated_fluents |= literal.negated_fluent_names
                     groups += 1
                     continue
