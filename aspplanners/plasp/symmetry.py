@@ -121,11 +121,20 @@ def object_classes(problem: Problem) -> List[List[str]]:
         return frozenset(_canonical(sub.substitute(g, subs)) for g in goals)
 
     # A cheap signature first: the shape of an object's own initial facts with
-    # itself blanked out. Objects whose signatures differ are never swappable;
-    # ones whose signatures agree still get the exact check (`on(a, b)`).
+    # itself blanked out and every other object reduced to its type, so that a
+    # task stating its false facts outright (an untyped one, after defaults)
+    # does not tell `at(ball1, ball2)` from `at(ball2, ball1)` here. Objects
+    # whose signatures differ are never swappable; ones whose signatures agree
+    # still get the exact check (`on(a, b)`).
+    type_of = {o.name: (o.type.name if o.type is not None else None) for o in problem.all_objects}
+
+    def blank(tup, me):
+        fluent, args, val = tup
+        shape = lambda x: '*' if x == me else type_of.get(x, x)
+        return (fluent, tuple(shape(x) for x in args), shape(val))
+
     def signature(o):
-        return (o.type.name if o.type is not None else None,
-                frozenset(_swap_tuple(t, o.name, '*') for t in mentions[o.name]))
+        return (type_of[o.name], frozenset(blank(t, o.name) for t in mentions[o.name]))
     buckets: Dict[tuple, List] = {}
     for o in objects:
         buckets.setdefault(signature(o), []).append(o)

@@ -242,8 +242,13 @@ class LiftedAction:
                     body.append(self._literal_body(literal))
             term = str(target)
             value = str(eff.value).lower()
+            # Joined with ';', not ',': a condition literal over quantified
+            # variables is a conditional literal, and after one a ','
+            # continues its condition instead of starting the next body
+            # literal -- a second `forall` condition then fails to parse, and a
+            # plain atom after one is silently absorbed into the condition.
             self.step_rules.append(
-                f"caused({term}, value({term}, {value}), t) :- {', '.join(body)}.")
+                f"caused({term}, value({term}, {value}), t) :- {'; '.join(body)}.")
 
 
     def _numeric_effects(self, action) -> None:

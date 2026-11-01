@@ -299,3 +299,20 @@ def test_the_seq_family_is_unchanged():
     planner, plan = solve(pddl("gripper"), "seq")
     assert "occurs" in planner.lp_program() and not planner.step_rules
     assert planner.solved_horizon == len(plan.actions) == 5
+
+
+def test_a_conditional_effect_with_two_quantified_conditions_parses_and_solves():
+    """miconic-simpleadl's `stop` boards every passenger whose origin is the
+    floor and who is not yet served: two `forall`-bound conditions on one
+    effect, i.e. two conditional literals in one rule body, which have to be
+    separated by ';' (a ',' would continue the first condition and clingo
+    rejects the second). 420 benchmark tasks failed to parse on this."""
+    problem = pddl("miconic-simpleadl")
+    lifted = PLASPPlanner(problem, "lifted")
+    assert any(" : " in rule and "; " in rule for rule in lifted.compiled_task.step_rules)
+    plan = lifted.plan(timeout=120)
+    assert lifted.status == PlanGenerationResultStatus.SOLVED_SATISFICING, lifted.logs
+    assert lifted.validate(plan)[0]
+    seq = PLASPPlanner(problem, "seq")
+    seq.plan(timeout=120)
+    assert seq.solved_horizon == lifted.solved_horizon
