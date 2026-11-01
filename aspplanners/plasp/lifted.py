@@ -125,6 +125,10 @@ class LiftedAction:
         self.static_fluents = static_fluents
         self.negated_fluents: Set[str] = set()
         self._group_index = 0
+        # The schema's positive static preconditions, as (parameter names,
+        # initialState atom): the narrowing seq folds into its action
+        # declaration, applied here to the keys of the disjunction facts.
+        self._static_guards: List[tuple] = []
         self.facts: List[str] = [f'schema({self.term}).']
         for p in action.parameters:
             self.facts.append(
@@ -189,17 +193,27 @@ class LiftedAction:
 
     # -- preconditions -------------------------------------------------------
 
+    def _key_body(self, names) -> List[str]:
+        """The body ranging a key over parameters `names`: their type atoms,
+        narrowed by every positive static precondition of the schema whose
+        parameters are among them -- seq's own declaration folding, without
+        which airport's `move(a, t, d1, s1, s2, d2)` ranges a key over every
+        pair of segments where `move-dir(s1, s2, d2)` admits a few hundred."""
+        names = set(names)
+        return [self.types[n] for n in sorted(names, key=self.index.get)] + \
+               [atom for guard_names, atom in self._static_guards if guard_names <= names]
+
     def _disjunction(self, disjunction: ASPDisjunction, fnode) -> None:
         """seq's orGroup/orDisjunct facts for one disjunctive precondition,
         keyed by a term of this schema and the parameters the condition
-        mentions (`fnode`), ranged by their types -- not by the whole
-        signature, which for a wide schema is objects to the power of its
-        arity. The layer's one constraint reads occurs(A, t) for the key, so a
-        bridging step rule derives it from the step's schema and arguments."""
+        mentions (`fnode`), ranged by their types and static preconditions --
+        not by the whole signature, which for a wide schema is objects to the
+        power of its arity. The layer's one constraint reads occurs(A, t) for
+        the key, so a bridging step rule derives it from the step's schema and
+        arguments."""
         names = sorted(_parameter_names(fnode), key=self.index.get)
         key = f'disj(({self.term},{self._group_index}' + ''.join(f',{self.var[n]}' for n in names) + '))'
-        self.facts += _or_facts(disjunction, '0', owner=key,
-                                body_prefix=[self.types[n] for n in names])
+        self.facts += _or_facts(disjunction, '0', owner=key, body_prefix=self._key_body(names))
         guard = [f'schema({self.term}, t)'] + [f'arg({self.term}, {self.index[n]}, {self.var[n]}, t)' for n in names]
         self.step_rules.append(f"occurs({key}, t) :- {', '.join(guard)}.")
         self.negated_fluents |= disjunction.negated_fluent_names
@@ -207,6 +221,15 @@ class LiftedAction:
 
     def _preconditions(self, action) -> None:
         conjuncts = [c for pre in action.preconditions for c in (pre.args if pre.is_and() else [pre])]
+        # The static guards first, so every disjunction can be narrowed by them.
+        for precondition in conjuncts:
+            for literal in flatten_atoms(parseexpr(precondition, context=self.context)):
+                if isinstance(literal, ASPExpr) and literal.up_expr.is_fluent_exp() \
+                        and literal.up_expr.fluent().name in self.static_fluents \
+                        and literal.value == 'true' and not literal.bindings:
+                    term = str(literal)
+                    self._static_guards.append((frozenset(_parameter_names(literal.up_expr)),
+                                                f'initialState({term}, value({term}, true))'))
         for precondition in conjuncts:
             for literal in flatten_atoms(parseexpr(precondition, context=self.context)):
                 if isinstance(literal, ASPDisjunction):
@@ -282,7 +305,7 @@ class LiftedAction:
                     self._refuse("a numeric effect condition", f"action {action.name}")
                 if isinstance(literal, ASPDisjunction):
                     self.facts += _or_facts(literal, str(groups), owner=effect_term,
-                                            body_prefix=_dedup([self.types[n] for n in cond_names] + forall_bindings))
+                                            body_prefix=_dedup(self._key_body(cond_names) + forall_bindings))
                     self.negated_fluents |= literal.negated_fluent_names
                     groups += 1
                     continue
