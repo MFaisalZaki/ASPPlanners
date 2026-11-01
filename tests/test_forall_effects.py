@@ -306,3 +306,26 @@ def test_a_conditional_constant_assignment_is_still_encoded():
     assert 'postcondition(action(("tax")), effect((cond,"tax",0)), ' \
            'variable(("weight",constant("d"))), ' \
            'value(variable(("weight",constant("d"))), 5))' in facts
+
+
+def test_a_universally_quantified_disjunct_over_an_empty_type_holds_vacuously():
+    """elevators-00-full's `stop` has the precondition
+    ``(or (forall (?p - vip) (served ?p)) (exists (?p - vip) ...))``; with no
+    vip in the instance the first disjunct is vacuously true. It used to be
+    declared under the vip binding and so vanished with the type, leaving the
+    group without a disjunct: `stop` was never applicable and the sweep
+    reported 21 solvable tasks as unsolvable."""
+    import os
+    from unified_planning.io import PDDLReader
+    from unified_planning.engines import PlanGenerationResultStatus
+    from aspplanners.plasp.planner import PLASPPlanner
+    here = os.path.join(os.path.dirname(__file__), "pddl", "elevators-00-full")
+    problem = PDDLReader().parse_problem(os.path.join(here, "domain.pddl"), os.path.join(here, "problem.pddl"))
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(timeout=120)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING, planner.logs
+    assert planner.solved_horizon == 4 and planner.validate(plan)[0]
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(search="pdr", timeout=120)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING, planner.logs
+    assert planner.validate(plan)[0]

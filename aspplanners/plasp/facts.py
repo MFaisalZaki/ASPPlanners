@@ -80,6 +80,13 @@ class ASPDisjunct:
                 self.atoms.append(item)
         self.bindings = sorted(set(extra_bindings) |
                                {b for item in self.atoms + self.tests for b in item.bindings})
+        # The bindings the disjunct's *declaration* depends on: its own
+        # `exists` variables and its tests'. An atom's bindings are not among
+        # them -- a `forall` literal inside the disjunct ranges over them, and
+        # over an empty type it is vacuously true, so the disjunct has to exist
+        # (and hold) with no literal at all, not vanish and fail its group.
+        self.own_bindings = sorted(set(extra_bindings) |
+                                   {b for item in self.tests for b in item.bindings})
 
 
 class ASPDisjunction:
@@ -965,18 +972,23 @@ def _or_facts(disjunction, gid, owner=None, body_prefix=(), scope_vars=(),
     for index, disjunct in enumerate(disjunction.disjuncts):
         # An equality test goes in the body: a disjunct whose test fails is not
         # declared at all, which is exactly it failing.
-        disjunct_body = _dedup(body + disjunct.bindings + [str(test) for test in disjunct.tests])
+        # The disjunct is declared under its own bindings only (see
+        # ASPDisjunct.own_bindings); each literal adds the bindings of the
+        # variables it ranges over, so a universally quantified literal over an
+        # empty type contributes no instance and the disjunct holds vacuously.
+        disjunct_body = _dedup(body + disjunct.own_bindings + [str(test) for test in disjunct.tests])
         facts.append(fact('DisjunctId', [group, disjunct.id], disjunct_body))
         for atom in disjunct.atoms:
+            atom_body = _dedup(disjunct_body + atom.bindings)
             if isinstance(atom, ASPNumComparison):
-                facts.append(fact('DisjunctNum', [group, disjunct.id, str(atom)], disjunct_body))
+                facts.append(fact('DisjunctNum', [group, disjunct.id, str(atom)], atom_body))
                 # The sides are declared under the disjunct's own body, so a
                 # disjunct the grounder never declares never declares them either.
-                facts += atom.declaration_rules(_dedup(disjunct_body + atom.bindings))
+                facts += atom.declaration_rules(atom_body)
             elif isinstance(atom, ASPExpr):
                 facts.append(fact('Disjunct', [group, disjunct.id, str(atom),
                                                f'value({str(atom)}, {atom.value})'],
-                                  disjunct_body))
+                                  atom_body))
             else:
                 raise NotImplementedError(
                     f"Unsupported literal {atom} in a disjunctive condition of "
