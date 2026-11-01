@@ -23,6 +23,7 @@ from unified_planning.shortcuts import (
 from unified_planning.engines import PlanGenerationResultStatus
 
 import aspplanners  # noqa: F401
+from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import LIFTED, SEQ, fact_predicates
 from aspplanners.plasp.planner import PLASPPlanner
 
@@ -261,7 +262,7 @@ def test_the_lifted_step_program_is_smaller_where_action_arity_exceeds_predicate
 # ---------------------------------------------------------------------------
 
 def test_the_family_has_its_own_files_and_the_numeric_layer_is_seqs_verbatim():
-    assert LIFTED.layer_names == ("core", "numeric", "symmetry")
+    assert LIFTED.layer_names == ("core", "numeric", "disjunctive", "symmetry")
     assert LIFTED.directory != SEQ.directory
     for name in LIFTED.layer_names:
         assert os.path.isfile(LIFTED.path(name)), name
@@ -271,12 +272,10 @@ def test_the_family_has_its_own_files_and_the_numeric_layer_is_seqs_verbatim():
         text = open(path).read()
         return text[text.index("#program base."):]
     assert rules(LIFTED.path("numeric")) == rules(SEQ.path("numeric"))
+    assert rules(LIFTED.path("disjunctive")) == rules(SEQ.path("disjunctive"))
 
 
 @pytest.mark.parametrize("make_problem, feature", [
-    (disjunction_problem, "disjunctive"),
-    (lambda: pddl("lift"), "disjunctive"),
-    (lambda: pddl("briefcase", "problem-carry.pddl"), "disjunctive"),
     (lambda: pddl("matchcellar"), "temporal"),
 ])
 def test_tasks_needing_a_missing_layer_are_refused_with_the_reason(make_problem, feature):
@@ -316,3 +315,79 @@ def test_a_conditional_effect_with_two_quantified_conditions_parses_and_solves()
     seq = PLASPPlanner(problem, "seq")
     seq.plan(timeout=120)
     assert seq.solved_horizon == lifted.solved_horizon
+
+
+# ---------------------------------------------------------------------------
+# Disjunctive conditions: seq's layer over a derived action term
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("make_problem", [
+    disjunction_problem,
+    lambda: pddl("lift"),
+    lambda: pddl("briefcase", "problem-carry.pddl"),
+    lambda: pddl("elevators-00-full"),   # a disjunct that holds vacuously
+])
+def test_disjunctive_tasks_are_solved_at_seqs_horizon(make_problem):
+    lifted, plan = solve(make_problem(), "lifted")
+    assert "disjunctive" in lifted.layers
+    # A bridging rule exactly for the schemas whose own groups exist (briefcase
+    # carries its disjunction on a conditional effect, which needs none).
+    action_groups = {line.split('"')[1] for line in lifted.compiled_task.fact_lines
+                     if line.startswith("orGroup(action(")}
+    bridged = {rule.split('"')[1] for rule in lifted.compiled_task.step_rules if rule.startswith("occurs(")}
+    assert bridged == action_groups
+    seq, _ = solve(make_problem(), "seq")
+    assert lifted.solved_horizon == seq.solved_horizon
+
+
+def test_the_bridging_rule_is_emitted_only_for_schemas_with_a_disjunction():
+    planner = PLASPPlanner(pddl("lift"), "lifted")
+    bridged = {rule.split('"')[1] for rule in planner.compiled_task.step_rules if rule.startswith("occurs(")}
+    disjunctive = {a.name for a in planner.task.actions
+                   if any(" or " in str(c) or "Exists" in str(c) or "implies" in str(c) for c in a.preconditions)}
+    assert bridged and bridged <= {asp_name(n) for n in disjunctive}
+
+
+def test_a_conditional_effect_with_a_disjunctive_condition():
+    from unified_planning.shortcuts import BoolType, Fluent, InstantaneousAction, Object, Or, Problem, UserType
+    Thing = UserType("thing")
+    hot, wet, done, go = (Fluent(n, BoolType(), x=Thing) for n in ("hot", "wet", "done", "go"))
+    act = InstantaneousAction("act", x=Thing)
+    x = act.parameters[0]
+    act.add_precondition(go(x))
+    act.add_effect(go(x), False)
+    act.add_effect(done(x), True, condition=Or(hot(x), wet(x)))
+    problem = Problem("cond_or")
+    for fl in (hot, wet, done, go):
+        problem.add_fluent(fl, default_initial_value=False)
+    a, b, c = (Object(n, Thing) for n in "abc")
+    problem.add_objects([a, b, c]); problem.add_action(act)
+    for o in (a, b, c):
+        problem.set_initial_value(go(o), True)
+    problem.set_initial_value(hot(a), True); problem.set_initial_value(wet(b), True)
+    problem.add_goal(done(a)); problem.add_goal(done(b))
+    lifted, plan = solve(problem, "lifted")
+    assert lifted.solved_horizon == 2
+    assert any("orGroupHolds(effect((" in rule for rule in lifted.compiled_task.step_rules)
+    # c is neither hot nor wet: acting on it never makes it done.
+    problem.add_goal(done(c))
+    planner = PLASPPlanner(problem, "lifted")
+    planner.plan(horizon=3)
+    assert planner.status == PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
+
+
+def test_a_disjunctive_goal_needs_no_bridge():
+    from unified_planning.shortcuts import Or
+    problem = pddl("gripper")
+    at, b1, b2, roomb = problem.fluent("at"), problem.object("ball-1"), problem.object("ball-2"), problem.object("room-b")
+    problem.clear_goals(); problem.add_goal(Or(at(b1, roomb), at(b2, roomb)))
+    lifted, plan = solve(problem, "lifted")
+    assert "disjunctive" in lifted.layers and lifted.solved_horizon == 3
+    assert not any(rule.startswith("occurs(") for rule in lifted.compiled_task.step_rules)
+
+
+def test_pdr_on_a_disjunctive_lifted_task():
+    planner = PLASPPlanner(pddl("lift"), "lifted")
+    plan = planner.plan(search="pdr", timeout=120)
+    assert planner.status == PlanGenerationResultStatus.SOLVED_SATISFICING, planner.logs
+    assert planner.validate(plan)[0]

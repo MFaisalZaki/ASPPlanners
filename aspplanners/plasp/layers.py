@@ -379,6 +379,17 @@ LIFTED_LAYERS: Tuple[Layer, ...] = (
         owns=frozenset({'numVariable', 'numConst', 'numTerm', 'numGoal', 'numValueNeeded'}),
         kind_features=_SEQ_BY_NAME['numeric'].kind_features,
     ),
+    # seq's disjunctive layer as it is: its facts are keyed by the ground
+    # action term, which the lifted encoder derives per step for the schemas
+    # that have a disjunction (see aspplanners.plasp.lifted).
+    Layer(
+        name='disjunctive',
+        filename='disjunctive.lp',
+        summary=_SEQ_BY_NAME['disjunctive'].summary,
+        requires=('core',),
+        owns=_SEQ_BY_NAME['disjunctive'].owns,
+        kind_features=_SEQ_BY_NAME['disjunctive'].kind_features,
+    ),
     Layer(
         name='symmetry',
         filename='symmetry.lp',
@@ -393,8 +404,6 @@ LIFTED = EncodingFamily(
     directory=os.path.join(ENCODINGS_DIR, 'lifted'),
     layers=LIFTED_LAYERS,
     unsupported=(
-        ('disjunctive', _SEQ_BY_NAME['disjunctive'].owns | frozenset({'orDisjunctNum', 'goalOrDisjunctNum'}),
-         "disjunctive conditions would need the disjunctive layer restated per schema"),
         ('temporal', _SEQ_BY_NAME['temporal'].owns | frozenset({'numOverall'}),
          "happenings are built on one ground snap action per step"),
     ),

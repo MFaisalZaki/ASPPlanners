@@ -49,10 +49,25 @@ against the initial state rather than the state chain), unconditional and
 conditional boolean effects, `forall` effects (one rule firing per binding),
 `forall` inside a condition (a conditional literal, which is gringo's
 conjunction over the bindings), linear numeric preconditions and goals, and
-constant and expression-valued increase, decrease and assign effects. Not
-covered, and refused at construction with the reason: disjunctive conditions,
-conditional numeric effects, numeric conditions on a conditional effect, and
-durative actions.
+constant and expression-valued increase, decrease and assign effects.
+
+Disjunctive conditions use seq's disjunctive layer as it is. Its facts are
+keyed by a ground action term and its one action-level constraint reads
+`occurs(A, t)`, so a schema with a disjunctive precondition gets the same
+orGroup/orDisjunct facts seq would build for it (ranged by the parameters'
+types) and one bridging step rule deriving the ground action term from the
+step's schema and arguments:
+
+    occurs(action(("stop",F)), t) :- schema("stop", t), arg("stop", 1, F, t).
+
+That is one derived atom per binding per step, seq's price, paid only by the
+schemas that have a disjunction; the goal rules and the effect-condition
+groups read the state alone and need no bridge. A conditional effect whose
+condition is disjunctive carries the groups on an effect term of its own and
+requires them in its `caused` rule the way core's does.
+
+Not covered, and refused at construction with the reason: conditional numeric
+effects, numeric conditions on a conditional effect, and durative actions.
 """
 
 from fractions import Fraction
@@ -64,8 +79,9 @@ from aspplanners.plasp.encoder import ASPEncodingResult, PLASPEncoder
 
 from aspplanners.plasp.facts import (
     ASPDisjunction, ASPEquality, ASPExpr, ASPNumComparison, _dedup, _effect_bindings,
-    _effect_constant, _effect_expr, _fold_fractional_statics, _lin_add, _lin_scale,
-    _linear_form, _reads_fluents, _variable_terms, asp_name, flatten_atoms, parseexpr,
+    _effect_constant, _effect_expr, _fold_fractional_statics, _head_term, _lin_add,
+    _lin_scale, _linear_form, _or_facts, _reads_fluents, _signature, _variable_terms,
+    asp_name, flatten_atoms, parseexpr,
 )
 from aspplanners.plasp.numeric_terms import NO_FOLDING
 from aspplanners.plasp.layers import fact_predicates
@@ -105,6 +121,12 @@ class LiftedAction:
                       for p in action.parameters}
         self.static_fluents = static_fluents
         self.negated_fluents: Set[str] = set()
+        # The ground action term seq would use, with the same parameter
+        # variables as the arg atoms bind: the key of the disjunctive layer's
+        # facts, and the head of the bridging rule that derives it per step.
+        self.head = f'action({_head_term(action.name, _signature(action.parameters))})'
+        self._group_index = 0
+        self._bridge = False
         self.facts: List[str] = [f'schema({self.term}).']
         for p in action.parameters:
             self.facts.append(
@@ -114,6 +136,10 @@ class LiftedAction:
         self._preconditions(action)
         self._effects(action)
         self._numeric_effects(action)
+        if self._bridge:
+            guard = [f'schema({self.term}, t)'] + [
+                f'arg({self.term}, {self.index[p.name]}, {self.var[p.name]}, t)' for p in action.parameters]
+            self.step_rules.append(f"occurs({self.head}, t) :- {', '.join(guard)}.")
 
     # -- pieces ------------------------------------------------------------
 
@@ -164,8 +190,8 @@ class LiftedAction:
     @staticmethod
     def _refuse(what, where) -> None:
         raise ValueError(
-            f"The lifted encoding cannot state {what} in {where}: disjunctive and numeric "
-            "conditions are not in its first version. Use the 'seq' encoding for this task.")
+            f"The lifted encoding cannot state {what} in {where}: numeric conditions on "
+            "an effect are not in its first version. Use the 'seq' encoding for this task.")
 
     # -- preconditions -------------------------------------------------------
 
@@ -173,7 +199,15 @@ class LiftedAction:
         for precondition in action.preconditions:
             for literal in flatten_atoms(parseexpr(precondition, context=self.context)):
                 if isinstance(literal, ASPDisjunction):
-                    self._refuse("a disjunctive condition", f"action {action.name}")
+                    # seq's own orGroup/orDisjunct facts for the action term,
+                    # ranged by the parameters' types; the layer's constraint
+                    # reads occurs/2, which the bridging rule derives.
+                    self.facts += _or_facts(literal, str(self._group_index), owner=self.head,
+                                            body_prefix=list(self.types.values()))
+                    self.negated_fluents |= literal.negated_fluent_names
+                    self._group_index += 1
+                    self._bridge = True
+                    continue
                 if isinstance(literal, ASPNumComparison):
                     self._numeric_precondition(literal)
                     continue
@@ -223,23 +257,40 @@ class LiftedAction:
             value = str(eff.value).lower()
             self.step_rules.append(
                 f"caused({term}, value({term}, {value}), t) :- {', '.join(body)}.")
-        for eff in action.conditional_effects:
+        for effect_index, eff in enumerate(action.conditional_effects):
             if not eff.fluent.type.is_bool_type():
                 raise ValueError(
                     f"The lifted encoding cannot state the conditional numeric effect on "
                     f"{eff.fluent} in action {action.name}: conditional numeric effects are "
                     "not in its first version. Use the 'seq' encoding for this task.")
             target = parseexpr(eff.fluent)
-            _names, forall_bindings = _variable_terms(eff.forall)
+            forall_names, forall_bindings = _variable_terms(eff.forall)
             body = self._guard(eff.fluent, eff.condition) + forall_bindings + list(target.bindings)
+            # The effect's own term, for the groups of a disjunctive condition:
+            # the schema's parameters and the effect's forall variables tell
+            # one binding's groups from another's.
+            effect_vars = [self.var[p.name] for p in action.parameters] + list(forall_names)
+            effect_term = f'effect(({self.term},{effect_index}' + ''.join(f',{v}' for v in effect_vars) + '))'
+            groups = 0
             for literal in flatten_atoms(parseexpr(eff.condition)):
-                if isinstance(literal, (ASPDisjunction, ASPNumComparison)):
-                    self._refuse("a disjunctive or numeric effect condition", f"action {action.name}")
+                if isinstance(literal, ASPNumComparison):
+                    self._refuse("a numeric effect condition", f"action {action.name}")
+                if isinstance(literal, ASPDisjunction):
+                    self.facts += _or_facts(literal, str(groups), owner=effect_term,
+                                            body_prefix=_dedup(list(self.types.values()) + forall_bindings))
+                    self.negated_fluents |= literal.negated_fluent_names
+                    groups += 1
+                    continue
                 self._note_negated(literal)
                 if isinstance(literal, ASPEquality):
                     body += list(literal.bindings) + [str(literal)]
                 else:
                     body.append(self._literal_body(literal))
+            if groups:
+                # Every group of the effect term has to hold, as core's caused/3
+                # demands of seq's effect terms; a group under a `forall` is one
+                # per binding, which the conditional literal ranges over.
+                body.append(f'orGroupHolds({effect_term}, G, t) : orGroup({effect_term}, G)')
             term = str(target)
             value = str(eff.value).lower()
             # Joined with ';', not ',': a condition literal over quantified
